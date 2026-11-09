@@ -1,0 +1,6 @@
+{
+  "name": "MY AI",
+  "description": "Premium all-in-one AI inspired by Google Gemini. Fluid chat, inline photo and video generation, image editing, code synthesis, and document reasoning in a single workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
