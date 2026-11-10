@@ -5,6 +5,7 @@ import {
   executeCustomVideoProvider,
   executeCustomAudioProvider,
 } from './providerClient.js';
+import { resolveProviderSecret } from './secrets.js';
 
 export class ProviderError extends Error {
   code: string;
@@ -39,24 +40,66 @@ export class ProviderError extends Error {
   }
 }
 
-export function getGeminiKeySource(): 'env' | 'override' | 'none' {
-  const envKey = process.env.GEMINI_API_KEY?.trim() || '';
-  if (envKey && envKey !== 'MY_GEMINI_API_KEY' && envKey.length > 10) return 'env';
-  const override = db.getConfig().geminiOverrideKey?.trim();
-  if (override && override.length > 10) return 'override';
+export function getGeminiKeySource(): 'env' | 'server_secret' | 'override' | 'none' {
+  const envCandidates = [
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_GENAI_API_KEY,
+    process.env.API_KEY,
+    process.env.VITE_GEMINI_API_KEY,
+  ];
+  for (const raw of envCandidates) {
+    const k = (raw || '').trim();
+    if (k && k !== 'MY_GEMINI_API_KEY' && k.length > 8) return 'env';
+  }
+  try {
+    const sec = resolveProviderSecret('gemini');
+    if (sec?.key && sec.key.length > 8) return 'server_secret';
+  } catch {}
+  try {
+    const override = db.getConfig().geminiOverrideKey?.trim();
+    if (override && override.length > 8) return 'override';
+  } catch {}
   return 'none';
 }
 
 export function getEffectiveGeminiKey(): string {
-  const envKey = process.env.GEMINI_API_KEY?.trim() || '';
-  if (envKey && envKey !== 'MY_GEMINI_API_KEY' && envKey.length > 10) return envKey;
-  const override = db.getConfig().geminiOverrideKey?.trim();
-  if (override && override.length > 10) return override;
+  const envCandidates = [
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_GENAI_API_KEY,
+    process.env.API_KEY,
+    process.env.VITE_GEMINI_API_KEY,
+  ];
+  for (const raw of envCandidates) {
+    const k = (raw || '').trim();
+    if (k && k !== 'MY_GEMINI_API_KEY' && k.length > 8) {
+      return k;
+    }
+  }
+  try {
+    const sec = resolveProviderSecret('gemini');
+    if (sec?.key && sec.key.length > 8) return sec.key;
+  } catch {}
+  try {
+    const secGoogle = resolveProviderSecret('google');
+    if (secGoogle?.key && secGoogle.key.length > 8) return secGoogle.key;
+  } catch {}
+  try {
+    const override = db.getConfig().geminiOverrideKey?.trim();
+    if (override && override.length > 8) return override;
+  } catch {}
   return '';
 }
 
 export function getGeminiClient(): GoogleGenAI {
   const apiKey = getEffectiveGeminiKey();
+  if (!apiKey) {
+    throw new ProviderError(
+      'Gemini API key is not configured or is missing. Please set GEMINI_API_KEY in environment variables or in Settings > Secrets.',
+      { code: 'MISSING_API_KEY', missingConfig: 'GEMINI_API_KEY' }
+    );
+  }
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -236,11 +279,11 @@ export function classifyGeminiError(err: any, modelName: string): ProviderError 
   });
 }
 
-export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs = 45000, label = 'Operation'): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new ProviderError(`${label} timed out after ${Math.round(timeoutMs / 1000)}s.`, { code: 'TIMEOUT' }));
+      reject(new ProviderError(`${label} timed out after ${Math.round(timeoutMs / 1000)}s.`, { code: 'TIMEOUT', httpStatus: 504 }));
     }, timeoutMs);
   });
   try {
@@ -264,15 +307,20 @@ export async function retryGeminiCall<T>(
       const msg = (err?.message || '').toLowerCase();
       const isTransient =
         msg.includes('503') ||
+        msg.includes('502') ||
+        msg.includes('504') ||
         msg.includes('500') ||
         msg.includes('unavailable') ||
+        msg.includes('overloaded') ||
         msg.includes('econnreset') ||
+        msg.includes('etimedout') ||
+        msg.includes('fetch failed') ||
         msg.includes('429') ||
         msg.includes('resource_exhausted');
       if (!isTransient || attempt === maxRetries) {
         throw classifyGeminiError(err, modelName);
       }
-      const backoffMs = 700 * Math.pow(2, attempt);
+      const backoffMs = 800 * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, backoffMs));
     }
   }
@@ -380,7 +428,7 @@ export async function testGeminiConnection(preferredModel?: string): Promise<{
 }
 
 export async function diagnoseGeminiSetup(): Promise<{
-  keySource: 'env' | 'override' | 'none';
+  keySource: 'env' | 'server_secret' | 'override' | 'none';
   configured: boolean;
   listedModels: Array<{ name: string; supportedActions: string[] }>;
   listModelsError?: string;

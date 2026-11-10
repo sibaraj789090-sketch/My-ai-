@@ -76,13 +76,26 @@ const cancelledJobIds = new Set<string>();
 // Recover any orphaned pending/streaming messages left over from prior server restarts
 db.recoverStuckMessages(runningJobIds);
 
-function getActiveUser() {
+function getActiveUser(req?: Request) {
+  if (req) {
+    const headerUserId = ((req.headers['x-user-id'] as string) || '').trim();
+    if (headerUserId) {
+      const found = db.getUser(headerUserId);
+      if (found) return found;
+    }
+    const authHeader = ((req.headers['authorization'] as string) || '').trim();
+    if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      const byId = db.getUser(token);
+      if (byId) return byId;
+    }
+  }
   return db.getUser(currentUserId) || db.getUsers()[0];
 }
 
 // Server-side Admin Authorization Middleware
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const user = getActiveUser();
+  const user = getActiveUser(req);
   if (!user || user.role !== 'admin') {
     return res.status(403).json({
       error: 'Administrator authorization required. Switch to an admin account to access this panel.',
@@ -1250,15 +1263,35 @@ app.post('/api/chat', async (req, res) => {
       sendSse({ type: 'start', modelUsed: targetModel });
 
       const streamWithModel = async (mId: string): Promise<string> => {
-        const streamResp = await withTimeout(
-          ai.models.generateContentStream({
-            model: mId,
-            contents: { parts: processedParts },
-            config: buildConfigForModel(mId),
-          }),
-          25000,
-          `Gemini stream (${mId})`
-        );
+        let streamResp: any;
+        for (let attempt = 0; attempt <= 2; attempt++) {
+          try {
+            streamResp = await withTimeout(
+              ai.models.generateContentStream({
+                model: mId,
+                contents: { parts: processedParts },
+                config: buildConfigForModel(mId),
+              }),
+              45000,
+              `Gemini stream (${mId})`
+            );
+            break;
+          } catch (err: any) {
+            const errStr = (err?.message || '').toLowerCase();
+            const isTransient =
+              errStr.includes('503') ||
+              errStr.includes('502') ||
+              errStr.includes('504') ||
+              errStr.includes('unavailable') ||
+              errStr.includes('overloaded') ||
+              errStr.includes('econnreset') ||
+              errStr.includes('timeout');
+            if (!isTransient || attempt === 2) {
+              throw err;
+            }
+            await new Promise((r) => setTimeout(r, 800 * Math.pow(2, attempt)));
+          }
+        }
 
         let accumulated = '';
         for await (const chunk of streamResp) {
@@ -1630,35 +1663,50 @@ app.post('/api/auth/login', async (req, res) => {
   const cfg = db.getConfig();
   const sb = getSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
   if (sb && password) {
-    const { data, error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) {
-      return res.status(401).json({ error: error.message });
-    }
-    if (data.user) {
-      let local = db.getUserByEmail(email);
-      if (!local) {
-        local = db.createUser({
-          id: data.user.id,
-          email,
-          name: email.split('@')[0],
-          role: email.toLowerCase() === 'siba02062005@gmail.com' ? 'admin' : 'user',
-          avatar: '',
-          tier: 'Free',
-          generationLimits: {
-            imagesRemaining: cfg.freeTierDailyImageLimit,
-            videosRemaining: cfg.freeTierDailyVideoLimit,
-            audioRemaining: cfg.freeTierDailyAudioLimit,
-            chatsRemaining: 100,
-            totalImagesQuota: cfg.freeTierDailyImageLimit,
-            totalVideosQuota: cfg.freeTierDailyVideoLimit,
-            totalAudioQuota: cfg.freeTierDailyAudioLimit,
-          },
-          createdAt: Date.now(),
-          status: 'active',
+    try {
+      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) {
+        return res.status(401).json({ error: error.message });
+      }
+      if (data.user) {
+        let local = db.getUserByEmail(email);
+        if (!local) {
+          local = db.createUser({
+            id: data.user.id,
+            email,
+            name: (data.user.user_metadata?.name as string) || email.split('@')[0],
+            role: email.toLowerCase() === 'siba02062005@gmail.com' ? 'admin' : 'user',
+            avatar: '',
+            tier: 'Free',
+            generationLimits: {
+              imagesRemaining: cfg.freeTierDailyImageLimit,
+              videosRemaining: cfg.freeTierDailyVideoLimit,
+              audioRemaining: cfg.freeTierDailyAudioLimit,
+              chatsRemaining: 100,
+              totalImagesQuota: cfg.freeTierDailyImageLimit,
+              totalVideosQuota: cfg.freeTierDailyVideoLimit,
+              totalAudioQuota: cfg.freeTierDailyAudioLimit,
+            },
+            createdAt: Date.now(),
+            status: 'active',
+          });
+        }
+        currentUserId = local.id;
+        return res.json({
+          success: true,
+          user: local,
+          session: data.session
+            ? {
+                access_token: data.session.access_token,
+                refresh_token: data.session.refresh_token,
+                expires_at: data.session.expires_at,
+              }
+            : undefined,
+          provider: 'supabase',
         });
       }
-      currentUserId = local.id;
-      return res.json({ success: true, user: local, provider: 'supabase' });
+    } catch (sbErr: any) {
+      console.warn('Supabase auth sign-in warning:', sbErr?.message || sbErr);
     }
   }
 
@@ -1677,17 +1725,29 @@ app.post('/api/auth/signup', async (req, res) => {
   const cfg = db.getConfig();
   const sb = getSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
   let assignedId = `user-${Date.now()}`;
+  let sessionData: any = undefined;
 
   if (sb && password) {
-    const { data, error } = await sb.auth.signUp({
-      email,
-      password,
-      options: { data: { name } },
-    });
-    if (error) {
-      return res.status(400).json({ error: error.message });
+    try {
+      const { data, error } = await sb.auth.signUp({
+        email,
+        password,
+        options: { data: { name } },
+      });
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+      if (data.user?.id) assignedId = data.user.id;
+      if (data.session) {
+        sessionData = {
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at,
+        };
+      }
+    } catch (sbErr: any) {
+      console.warn('Supabase auth sign-up warning:', sbErr?.message || sbErr);
     }
-    if (data.user?.id) assignedId = data.user.id;
   }
 
   if (db.getUserByEmail(email)) {
@@ -1698,7 +1758,7 @@ app.post('/api/auth/signup', async (req, res) => {
     id: assignedId,
     email,
     name,
-    role: 'user',
+    role: email.toLowerCase() === 'siba02062005@gmail.com' ? 'admin' : 'user',
     avatar: '',
     tier: 'Free',
     generationLimits: {
@@ -1714,7 +1774,35 @@ app.post('/api/auth/signup', async (req, res) => {
     status: 'active',
   });
   currentUserId = created.id;
-  res.json({ success: true, user: created });
+  res.json({ success: true, user: created, session: sessionData });
+});
+
+app.post('/api/auth/refresh', async (req, res) => {
+  const { refresh_token } = req.body || {};
+  if (!refresh_token) {
+    return res.status(400).json({ error: 'Refresh token is required.' });
+  }
+  const cfg = db.getConfig();
+  const sb = getSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+  if (!sb) {
+    return res.status(503).json({ error: 'Supabase authentication service is not configured.' });
+  }
+  try {
+    const { data, error } = await sb.auth.refreshSession({ refresh_token });
+    if (error || !data.session) {
+      return res.status(401).json({ error: error?.message || 'Session refresh failed.' });
+    }
+    return res.json({
+      success: true,
+      session: {
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+        expires_at: data.session.expires_at,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to refresh authentication session.' });
+  }
 });
 
 app.post('/api/user/switch', (req, res) => {

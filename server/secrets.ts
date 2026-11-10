@@ -88,6 +88,26 @@ export function resolveProviderSecret(
   }
 
   // Well-known alias fallbacks
+  if (
+    providerId.includes('gemini') ||
+    providerId.includes('google') ||
+    envName === 'GEMINI_API_KEY' ||
+    envName === 'GOOGLE_API_KEY' ||
+    envName === 'GOOGLE_GENAI_API_KEY' ||
+    envName === 'API_KEY'
+  ) {
+    const gem = (
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.GOOGLE_GENAI_API_KEY ||
+      process.env.API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      ''
+    ).trim();
+    if (gem && gem !== 'MY_GEMINI_API_KEY' && gem.length > 8) {
+      return { key: gem, source: 'env' };
+    }
+  }
   if (providerId.includes('hf') || providerId.includes('huggingface') || envName === 'HF_TOKEN' || envName === 'HUGGINGFACE_API_KEY') {
     const hf = (process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '').trim();
     if (hf) return { key: hf, source: 'env' };

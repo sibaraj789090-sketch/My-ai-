@@ -23,11 +23,38 @@ import { SettingsModal, SettingsSectionKey } from './components/SettingsModal';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { SubscriptionModal } from './components/SubscriptionModal';
 
+function getStoredUserId(): string | null {
+  try {
+    return localStorage.getItem('myai_active_user_id');
+  } catch {
+    return null;
+  }
+}
+
+function getStoredModel(): string {
+  try {
+    return localStorage.getItem('myai_selected_model') || 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra || {}) };
+  const uid = getStoredUserId();
+  if (uid) h['x-user-id'] = uid;
+  try {
+    const token = localStorage.getItem('myai_supabase_token');
+    if (token) h['authorization'] = `Bearer ${token}`;
+  } catch {}
+  return h;
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [availableUsers, setAvailableUsers] = useState<UserAccount[]>([]);
   const [models, setModels] = useState<AIModelConfig[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('auto');
+  const [selectedModel, setSelectedModel] = useState<string>(() => getStoredModel());
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
 
   const [siteConfig, setSiteConfig] = useState<{
@@ -81,12 +108,28 @@ export default function App() {
     setTimeout(() => setToastMsg(''), 3000);
   };
 
+  const handleSelectModel = (modelId: string) => {
+    setSelectedModel(modelId);
+    setIsModelDropdownOpen(false);
+    try {
+      localStorage.setItem('myai_selected_model', modelId);
+    } catch {}
+    if (currentUser) {
+      fetch('/api/user/preferences', {
+        method: 'PATCH',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ preferredModel: modelId }),
+      }).catch(() => {});
+    }
+  };
+
   const loadWorkspace = useCallback(async () => {
     try {
+      const headers = authHeaders();
       const [userRes, chatsRes, nbRes] = await Promise.all([
-        fetch('/api/user'),
-        fetch('/api/chats'),
-        fetch('/api/notebooks'),
+        fetch('/api/user', { headers }),
+        fetch('/api/chats', { headers }),
+        fetch('/api/notebooks', { headers }),
       ]);
       const userData = await userRes.json();
       const chatsData = await chatsRes.json();
@@ -94,6 +137,9 @@ export default function App() {
 
       if (userData.user) {
         setCurrentUser(userData.user);
+        try {
+          localStorage.setItem('myai_active_user_id', userData.user.id);
+        } catch {}
         if (userData.user.preferences?.theme) {
           setThemePref(userData.user.preferences.theme);
         }
@@ -129,7 +175,7 @@ export default function App() {
 
   const loadChatMessages = useCallback(async (chatId: string) => {
     try {
-      const res = await fetch(`/api/chats/${chatId}`);
+      const res = await fetch(`/api/chats/${chatId}`, { headers: authHeaders() });
       const data = await res.json();
       setMessages(data.messages || []);
     } catch {
@@ -239,7 +285,7 @@ export default function App() {
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         signal: controller.signal,
         body: JSON.stringify({
           chatId,
@@ -564,10 +610,7 @@ export default function App() {
                 <div className="absolute left-0 mt-2 w-72 rounded-2xl bg-[#0B1020] border border-slate-700/90 shadow-2xl p-1.5 z-50">
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedModel('auto');
-                      setIsModelDropdownOpen(false);
-                    }}
+                    onClick={() => handleSelectModel('auto')}
                     className={`w-full px-3 py-2.5 rounded-xl text-left flex items-center justify-between text-xs ${
                       selectedModel === 'auto'
                         ? 'bg-blue-600/20 text-blue-300 font-semibold border border-blue-500/30'
@@ -587,10 +630,7 @@ export default function App() {
                     <button
                       key={m.id}
                       type="button"
-                      onClick={() => {
-                        setSelectedModel(m.id);
-                        setIsModelDropdownOpen(false);
-                      }}
+                      onClick={() => handleSelectModel(m.id)}
                       className={`w-full px-3 py-2.5 rounded-xl text-left flex items-center justify-between text-xs ${
                         selectedModel === m.id
                           ? 'bg-blue-600/20 text-blue-300 font-semibold border border-blue-500/30'

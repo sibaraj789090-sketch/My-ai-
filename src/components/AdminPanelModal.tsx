@@ -140,10 +140,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     if (customVideoKey.trim()) payloadConfig.customVideoKey = customVideoKey.trim();
     if (customAudioKey.trim()) payloadConfig.customAudioKey = customAudioKey.trim();
     if (supabaseServiceKey.trim()) payloadConfig.supabaseServiceKey = supabaseServiceKey.trim();
+    if (!payloadConfig.supabaseUrl?.trim()) delete payloadConfig.supabaseUrl;
+    if (!payloadConfig.supabaseAnonKey?.trim()) delete payloadConfig.supabaseAnonKey;
 
     const res = await fetch('/api/admin/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': typeof window !== 'undefined' ? (localStorage.getItem('myai_active_user_id') || '') : '',
+      },
       body: JSON.stringify({ config: payloadConfig, models }),
     });
     const data = await res.json();

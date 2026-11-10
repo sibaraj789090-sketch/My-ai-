@@ -4,16 +4,19 @@ let cachedClient: SupabaseClient | null = null;
 let cachedUrl = '';
 let cachedKey = '';
 
-export function getSupabaseClient(customUrl?: string, customKey?: string): SupabaseClient | null {
-  const url = (
-    customUrl ||
+export function resolveSupabaseCredentials(customUrl?: string, customKey?: string): {
+  url: string;
+  key: string;
+  isConfigured: boolean;
+} {
+  const envUrl = (
     process.env.SUPABASE_URL ||
     process.env.NEXT_PUBLIC_SUPABASE_URL ||
     process.env.VITE_SUPABASE_URL ||
     ''
   ).trim();
-  const key = (
-    customKey ||
+
+  const envKey = (
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.SUPABASE_ANON_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
@@ -21,7 +24,20 @@ export function getSupabaseClient(customUrl?: string, customKey?: string): Supab
     ''
   ).trim();
 
-  if (!url || !key || !url.startsWith('http')) {
+  const url = (customUrl && customUrl.startsWith('http') ? customUrl : envUrl).trim();
+  const key = (customKey && customKey.length > 8 ? customKey : envKey).trim();
+
+  return {
+    url,
+    key,
+    isConfigured: !!(url && key && url.startsWith('http')),
+  };
+}
+
+export function getSupabaseClient(customUrl?: string, customKey?: string): SupabaseClient | null {
+  const { url, key, isConfigured } = resolveSupabaseCredentials(customUrl, customKey);
+
+  if (!isConfigured) {
     return null;
   }
 
@@ -32,8 +48,9 @@ export function getSupabaseClient(customUrl?: string, customKey?: string): Supab
   try {
     cachedClient = createClient(url, key, {
       auth: {
-        autoRefreshToken: false,
+        autoRefreshToken: true,
         persistSession: false,
+        detectSessionInUrl: false,
       },
     });
     cachedUrl = url;
@@ -46,33 +63,61 @@ export function getSupabaseClient(customUrl?: string, customKey?: string): Supab
 }
 
 export async function testSupabaseConnection(customUrl?: string, customKey?: string): Promise<{
+  configured: boolean;
   connected: boolean;
   message: string;
 }> {
+  const { isConfigured } = resolveSupabaseCredentials(customUrl, customKey);
+  if (!isConfigured) {
+    return {
+      configured: false,
+      connected: false,
+      message: 'SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) are not configured. Add them in Vercel / Environment Variables.',
+    };
+  }
+
   const client = getSupabaseClient(customUrl, customKey);
   if (!client) {
     return {
+      configured: true,
       connected: false,
-      message: 'SUPABASE_URL and SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are not configured.',
+      message: 'Failed to initialize Supabase client with configured URL and Key.',
     };
   }
 
   try {
     const { error } = await client.from('profiles').select('id').limit(1);
     if (error) {
+      if (
+        error.code === 'PGRST116' ||
+        error.message?.includes('does not exist') ||
+        error.code === '42P01'
+      ) {
+        return {
+          configured: true,
+          connected: true,
+          message: 'Connected to Supabase PostgreSQL database. (Tip: execute supabase/schema.sql in your Supabase SQL editor to create tables).',
+        };
+      }
       return {
+        configured: true,
         connected: true,
-        message: `Connected to Supabase URL, schema check returned: ${error.message}. Run supabase/schema.sql in your SQL Editor.`,
+        message: `Connected to Supabase instance (${error.message}).`,
       };
     }
     return {
+      configured: true,
       connected: true,
       message: 'Connected to Supabase PostgreSQL & Storage.',
     };
   } catch (err: any) {
+    cachedClient = null;
+    cachedUrl = '';
+    cachedKey = '';
     return {
+      configured: true,
       connected: false,
-      message: err?.message || 'Unable to reach Supabase instance.',
+      message: err?.message || 'Unable to reach Supabase instance. Check network or credentials.',
     };
   }
 }

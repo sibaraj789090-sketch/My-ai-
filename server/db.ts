@@ -614,7 +614,7 @@ class Database {
       },
     }));
 
-    // Merge models to ensure Free Image AI is enabled by default and paid image models remain optional (disabled by default)
+    // Merge models to ensure defaults exist while preserving user/admin modifications and custom models
     const existingModels: AIModelConfig[] = parsed.models || [];
     const needsPaidImageDefaultMigration = (parsed.schemaVersion || 1) < 2;
     const mergedModels = DEFAULT_MODELS.map((def) => {
@@ -622,8 +622,14 @@ class Database {
       if (needsPaidImageDefaultMigration && def.type === 'image') {
         return { ...def };
       }
-      return found ? { ...def, enabled: found.enabled } : def;
+      return found ? { ...def, ...found } : def;
     });
+
+    // Keep any non-default models that may have been configured by the admin
+    const extraModels = existingModels.filter(
+      (m) => !DEFAULT_MODELS.some((def) => def.id === m.id)
+    );
+    const finalModels = [...mergedModels, ...extraModels];
 
     // Clean out any legacy hardcoded Unsplash/BigBuckBunny sample jobs if present
     const cleanedJobs = (parsed.jobs || []).filter(
@@ -638,7 +644,7 @@ class Database {
       chats: parsed.chats || [],
       messages: parsed.messages || {},
       jobs: cleanedJobs,
-      models: mergedModels,
+      models: finalModels,
       notebooks: parsed.notebooks || [],
       feedback: parsed.feedback || [],
       publicLinks: parsed.publicLinks || [],
@@ -1096,21 +1102,23 @@ class Database {
   }
 
   updateConfig(updates: Partial<ServerProviderSecrets>) {
-    // Only overwrite secrets if non-empty strings were explicitly passed
+    // Never overwrite valid secrets, URLs, or keys with empty or whitespace-only strings
     const next = { ...this.data.config };
     for (const [key, val] of Object.entries(updates)) {
       if (val !== undefined) {
         if (
-          (key === 'supabaseServiceKey' ||
+          (key === 'supabaseUrl' ||
+            key === 'supabaseAnonKey' ||
+            key === 'supabaseServiceKey' ||
             key === 'customImageKey' ||
             key === 'customVideoKey' ||
             key === 'customAudioKey' ||
             key === 'geminiOverrideKey') &&
-          val === ''
+          (!val || (typeof val === 'string' && val.trim() === ''))
         ) {
           continue;
         }
-        (next as any)[key] = val;
+        (next as any)[key] = typeof val === 'string' ? val.trim() : val;
       }
     }
     this.data.config = next;

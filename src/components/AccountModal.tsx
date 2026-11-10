@@ -117,11 +117,17 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     setStatusMsg('');
     const res = await fetch('/api/user/switch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': userId,
+      },
       body: JSON.stringify({ userId }),
     });
     const data = await res.json();
     if (data.user) {
+      try {
+        localStorage.setItem('myai_active_user_id', data.user.id);
+      } catch {}
       await onWorkspaceReload();
       setName(data.user.name);
       setEmail(data.user.email);
@@ -149,6 +155,19 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     if (!res.ok) {
       setErrorMsg(data.error || 'Authentication failed.');
       return;
+    }
+    if (data.user?.id) {
+      try {
+        localStorage.setItem('myai_active_user_id', data.user.id);
+      } catch {}
+    }
+    if (data.session?.access_token) {
+      try {
+        localStorage.setItem('myai_supabase_token', data.session.access_token);
+        if (data.session.refresh_token) {
+          localStorage.setItem('myai_supabase_refresh_token', data.session.refresh_token);
+        }
+      } catch {}
     }
     await onWorkspaceReload();
     setAuthPassword('');
