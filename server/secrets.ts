@@ -69,6 +69,20 @@ export function resolveProviderSecret(
     }
   }
 
+  // Well-known alias fallbacks
+  if (providerId.includes('hf') || providerId.includes('huggingface') || envName === 'HF_TOKEN' || envName === 'HUGGINGFACE_API_KEY') {
+    const hf = (process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '').trim();
+    if (hf) return { key: hf, source: 'env' };
+  }
+  if (providerId.includes('photoroom') || envName === 'PHOTOROOM_API_KEY') {
+    const pr = (process.env.PHOTOROOM_API_KEY || '').trim();
+    if (pr) return { key: pr, source: 'env' };
+  }
+  if (providerId.includes('cashfree') || envName === 'CASHFREE_SECRET_KEY') {
+    const cf = (process.env.CASHFREE_SECRET_KEY || '').trim();
+    if (cf) return { key: cf, source: 'env' };
+  }
+
   const map = loadSecretsMap();
   const stored = (map[providerId] || '').trim();
   if (stored) {

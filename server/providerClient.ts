@@ -2,7 +2,13 @@ import { GoogleGenAI } from '@google/genai';
 import { ApiConnectionTestResult } from '../src/types.js';
 import { ApiProviderRecord } from './db.js';
 import { resolveProviderSecret } from './secrets.js';
-import { ProviderError, classifyGeminiError, withTimeout } from './mediaGenerators.js';
+import {
+  ProviderError,
+  classifyGeminiError,
+  withTimeout,
+  aspectRatioToDimensions,
+  synthesizeEditPromptWithGemini,
+} from './mediaGenerators.js';
 
 function parseJsonSafe(raw?: string): Record<string, any> {
   if (!raw || !raw.trim()) return {};
@@ -224,7 +230,9 @@ export async function testApiProviderConnection(
     // 3. Hugging Face Inference Protocol
     if (record.providerType === 'huggingface') {
       const resp = await fetch('https://huggingface.co/api/whoami-v2', {
-        headers: buildAuthHeaders(record, key),
+        headers: {
+          Authorization: `Bearer ${key}`,
+        },
         signal: AbortSignal.timeout(timeoutMs),
       });
       const latencyMs = Date.now() - started;
@@ -238,10 +246,11 @@ export async function testApiProviderConnection(
           modelName: record.modelName,
           latencyMs,
           httpStatus: resp.status,
-          message: `Hugging Face auth failed (HTTP ${resp.status}): ${errTxt.slice(0, 160)}`,
+          message: `Hugging Face auth failed (HTTP ${resp.status}): ${errTxt.slice(0, 180) || 'Invalid or expired HF_TOKEN.'}`,
         };
       }
       const who: any = await resp.json().catch(() => ({}));
+      const userName = who?.name || who?.fullname || 'Hugging Face user';
       return {
         connected: true,
         configured: true,
@@ -250,7 +259,45 @@ export async function testApiProviderConnection(
         modelName: record.modelName,
         latencyMs,
         httpStatus: 200,
-        message: `Connected as "${who?.name || 'Hugging Face user'}" for ${record.modelName} (${latencyMs}ms)`,
+        message: `Connected as "${userName}" · Router ready for "${record.modelName}" (${latencyMs}ms)`,
+      };
+    }
+
+    // 4. PhotoRoom Official API Protocol
+    if (record.providerType === 'photoroom') {
+      const accountUrl = 'https://image-api.photoroom.com/v2/account';
+      const resp = await fetch(accountUrl, {
+        method: 'GET',
+        headers: {
+          'x-api-key': key,
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const latencyMs = Date.now() - started;
+      if (!resp.ok) {
+        const errTxt = await resp.text().catch(() => '');
+        return {
+          connected: false,
+          configured: true,
+          providerId: record.id,
+          category: record.category,
+          modelName: record.modelName,
+          latencyMs,
+          httpStatus: resp.status,
+          message: `PhotoRoom auth failed (HTTP ${resp.status}): ${errTxt.slice(0, 180) || 'Invalid PHOTOROOM_API_KEY.'}`,
+        };
+      }
+      const data: any = await resp.json().catch(() => ({}));
+      const availableCredits = data?.credits?.available ?? data?.credits?.subscription ?? 'Active';
+      return {
+        connected: true,
+        configured: true,
+        providerId: record.id,
+        category: record.category,
+        modelName: record.modelName,
+        latencyMs,
+        httpStatus: 200,
+        message: `Connected to PhotoRoom API · Available Credits: ${availableCredits} (${latencyMs}ms)`,
       };
     }
 
@@ -695,34 +742,207 @@ export async function executeCustomImageOrEditProvider(
     }
   }
 
-  // 2. Hugging Face Image Inference
+  // 2. Hugging Face Image Generation & Editing Protocol
   if (record.providerType === 'huggingface') {
-    const url =
-      (record.apiUrl || '').trim() ||
-      `https://router.huggingface.co/hf-inference/models/${record.modelName}`;
+    const cleanBase = (record.apiUrl || '').trim().replace(/\/+$/, '');
+    const modelTarget = record.modelName || 'black-forest-labs/FLUX.1-schnell';
+    const url = cleanBase.includes('/models/')
+      ? cleanBase
+      : `${cleanBase || 'https://router.huggingface.co'}/hf-inference/models/${modelTarget}`;
+
+    const dims = aspectRatioToDimensions(options.aspectRatio || '1:1', 1024);
+
+    if (sourceImages.length > 0) {
+      // Image-to-image or Multi-image synthesis preserving subjects
+      const primaryImage = sourceImages[0];
+      const split = splitDataUrl(primaryImage.dataUrl, primaryImage.mimeType);
+
+      let effectivePrompt = options.prompt;
+      if (sourceImages.length > 1) {
+        const resolvedList: Array<{ data: string; mimeType: string }> = [];
+        for (const s of sourceImages) {
+          const sp = splitDataUrl(s.dataUrl, s.mimeType);
+          if (sp) resolvedList.push({ data: sp.base64, mimeType: sp.mimeType });
+        }
+        effectivePrompt = await synthesizeEditPromptWithGemini(resolvedList, options.prompt);
+      }
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          ...parseJsonSafe(record.extraHeadersJson),
+        },
+        body: JSON.stringify({
+          inputs: effectivePrompt,
+          ...(split ? { image: split.base64 } : {}),
+          parameters: {
+            width: dims.width,
+            height: dims.height,
+            ...parseJsonSafe(record.extraBodyJson),
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!resp.ok) {
+        const errTxt = await resp.text().catch(() => '');
+        throw new ProviderError(`Hugging Face error (HTTP ${resp.status}): ${errTxt.slice(0, 240)}`, {
+          httpStatus: resp.status,
+        });
+      }
+
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const mime = detectImageMime(buf, resp.headers.get('content-type'));
+      if (!mime) {
+        throw new ProviderError(`Hugging Face returned non-image bytes.`);
+      }
+
+      return {
+        imageUrl: `data:${mime};base64,${buf.toString('base64')}`,
+        modelLabel,
+        textNote:
+          sourceImages.length > 1
+            ? `Combined and edited using Hugging Face (${modelTarget}), preserving original subjects and appearance.`
+            : `Photo edited using Hugging Face (${modelTarget}).`,
+      };
+    }
+
+    // Text-to-Image Generation
     const resp = await fetch(url, {
       method: 'POST',
-      headers: buildAuthHeaders(record, key),
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        ...parseJsonSafe(record.extraHeadersJson),
+      },
       body: JSON.stringify({
         inputs: options.prompt,
-        ...parseJsonSafe(record.extraBodyJson),
+        parameters: {
+          width: dims.width,
+          height: dims.height,
+          ...parseJsonSafe(record.extraBodyJson),
+        },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
+
     if (!resp.ok) {
       const errTxt = await resp.text().catch(() => '');
-      throw new ProviderError(`${record.name} error (HTTP ${resp.status}): ${errTxt.slice(0, 220)}`, {
+      throw new ProviderError(`Hugging Face error (HTTP ${resp.status}): ${errTxt.slice(0, 240)}`, {
         httpStatus: resp.status,
       });
     }
+
     const buf = Buffer.from(await resp.arrayBuffer());
     const mime = detectImageMime(buf, resp.headers.get('content-type'));
     if (!mime) {
-      throw new ProviderError(`${record.name} did not return valid image bytes.`);
+      throw new ProviderError(`Hugging Face did not return valid image bytes.`);
     }
+
     return {
       imageUrl: `data:${mime};base64,${buf.toString('base64')}`,
       modelLabel,
+    };
+  }
+
+  // 3. PhotoRoom Official Image Editing API Protocol
+  if (record.providerType === 'photoroom') {
+    if (sourceImages.length === 0) {
+      throw new ProviderError(
+        'PhotoRoom is an image editing & background API that requires an uploaded image. Please attach a photo or select an image generation model (Hugging Face / Gemini / Free Image AI).'
+      );
+    }
+
+    const editUrl = (record.apiUrl || '').trim() || 'https://image-api.photoroom.com/v2/edit';
+    const primaryImage = sourceImages[0];
+    const split = splitDataUrl(primaryImage.dataUrl, primaryImage.mimeType);
+    if (!split) {
+      throw new ProviderError('Unable to process the uploaded image for PhotoRoom API.');
+    }
+
+    const form = new FormData();
+    const ext = split.mimeType.includes('jpeg') ? 'jpg' : split.mimeType.includes('webp') ? 'webp' : 'png';
+    form.append(
+      'imageFile',
+      new Blob([new Uint8Array(split.buffer)], { type: split.mimeType }),
+      `input.${ext}`
+    );
+    form.append('export.format', 'png');
+
+    const pLower = (options.prompt || '').toLowerCase();
+    const isBgRemoval =
+      pLower.includes('remove background') ||
+      pLower.includes('transparent background') ||
+      pLower.includes('cutout') ||
+      pLower.includes('isolate subject') ||
+      pLower.includes('extract person') ||
+      pLower.includes('delete background');
+
+    const isColor =
+      pLower.includes('white background')
+        ? 'FFFFFF'
+        : pLower.includes('black background')
+        ? '000000'
+        : pLower.includes('blue background')
+        ? '1E40AF'
+        : pLower.includes('red background')
+        ? 'DC2626'
+        : pLower.includes('green background')
+        ? '16A34A'
+        : pLower.includes('gray background') || pLower.includes('grey background')
+        ? '9CA3AF'
+        : null;
+
+    if (isColor) {
+      form.append('background.color', isColor);
+    } else if (isBgRemoval && !pLower.includes('replace') && !pLower.includes('scene') && !pLower.includes('on a ')) {
+      form.append('removeBackground', 'true');
+    } else {
+      // AI Scene Background Generation / Prompt-Based Photo Editing
+      form.append('background.prompt', options.prompt);
+      form.append('referenceBox', 'originalImage');
+    }
+
+    const extra = parseJsonSafe(record.extraBodyJson);
+    for (const [k, v] of Object.entries(extra)) {
+      if (typeof v === 'string') form.append(k, v);
+    }
+
+    const headers: Record<string, string> = {
+      'x-api-key': key,
+      'pr-hd-background-removal': 'auto',
+      ...parseJsonSafe(record.extraHeadersJson),
+    };
+
+    const resp = await fetch(editUrl, {
+      method: 'POST',
+      headers,
+      body: form,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!resp.ok) {
+      const errTxt = await resp.text().catch(() => '');
+      throw new ProviderError(`PhotoRoom API error (HTTP ${resp.status}): ${errTxt.slice(0, 240)}`, {
+        httpStatus: resp.status,
+      });
+    }
+
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const mime = detectImageMime(buf, resp.headers.get('content-type')) || 'image/png';
+
+    const note = isColor
+      ? `Replaced background with PhotoRoom solid color (#${isColor}).`
+      : isBgRemoval
+      ? 'Removed background and isolated subject with PhotoRoom HD cutout.'
+      : `Edited scene with PhotoRoom AI background for: "${options.prompt}".`;
+
+    return {
+      imageUrl: `data:${mime};base64,${buf.toString('base64')}`,
+      modelLabel: 'PhotoRoom (v2/edit)',
+      textNote: note,
     };
   }
 

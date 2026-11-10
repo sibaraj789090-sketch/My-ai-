@@ -25,6 +25,7 @@ interface AccountModalProps {
   onUserUpdated: (user: UserAccount) => void;
   onWorkspaceReload: () => Promise<void>;
   onOpenSettings: () => void;
+  onOpenSubscription?: () => void;
 }
 
 type AccountSection =
@@ -44,6 +45,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   onUserUpdated,
   onWorkspaceReload,
   onOpenSettings,
+  onOpenSubscription,
 }) => {
   const [section, setSection] = useState<AccountSection>('overview');
   const [name, setName] = useState(currentUser.name);
@@ -519,59 +521,109 @@ export const AccountModal: React.FC<AccountModalProps> = ({
           )}
 
           {section === 'subscription' && (
-            <div className="space-y-3">
-              {(
-                [
-                  {
-                    tier: 'Free' as const,
-                    price: '$0 / mo',
-                    perks: '15 images, 3 videos, 5 audio tracks daily · Gemini 3.1 Flash Lite',
-                  },
-                  {
-                    tier: 'Pro' as const,
-                    price: '$20 / mo',
-                    perks: '200 images, 50 videos, 100 audio tracks · Gemini 4 Argon + 4K Media',
-                  },
-                  {
-                    tier: 'Enterprise' as const,
-                    price: '$99 / mo',
-                    perks: 'Priority Omni Video & Lyria Studio · Unlimited workspace chats',
-                  },
-                ]
-              ).map((plan) => {
-                const isCurrent = currentUser.tier === plan.tier;
-                return (
-                  <div
-                    key={plan.tier}
-                    className={`p-4 rounded-2xl border ${
-                      isCurrent
-                        ? 'border-blue-500 bg-blue-600/15'
-                        : 'border-slate-800 bg-[#0B1020]'
-                    } flex items-center justify-between gap-3`}
-                  >
-                    <div>
-                      <div className="text-sm font-bold text-white">
-                        {plan.tier} · {plan.price}
-                      </div>
-                      <div className="text-xs text-slate-300 mt-0.5">
-                        {plan.perks}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={isCurrent}
-                      onClick={() => handleUpgrade(plan.tier)}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-semibold shrink-0 ${
-                        isCurrent
-                          ? 'bg-[#11192E] text-slate-300 border border-slate-700 cursor-default'
-                          : 'bg-blue-600 hover:bg-blue-500 text-white'
-                      }`}
-                    >
-                      {isCurrent ? 'Active' : 'Select'}
-                    </button>
+            <div className="space-y-4">
+              {currentUser.activeSubscription ? (
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-950/30 to-[#0B1020] border border-blue-500/40 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-blue-400 uppercase tracking-wider">
+                      Active Subscription
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
+                      ACTIVE
+                    </span>
                   </div>
-                );
-              })}
+                  <div className="text-base font-bold text-white">
+                    {currentUser.activeSubscription.planName}
+                  </div>
+                  <div className="text-xs text-slate-300">
+                    {currentUser.activeSubscription.expiryDate > 0 ? (
+                      <>
+                        Expires on{' '}
+                        <strong className="text-white">
+                          {new Date(currentUser.activeSubscription.expiryDate).toLocaleDateString()}
+                        </strong>
+                      </>
+                    ) : (
+                      'Free Forever / Lifetime Access'
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
+              {onOpenSubscription && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenSubscription();
+                  }}
+                  className="w-full py-3 rounded-2xl gemini-gradient-bg text-white text-xs font-bold shadow-lg hover:opacity-95 transition flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Open Full Premium Subscription & Checkout Portal</span>
+                </button>
+              )}
+
+              <div className="space-y-2.5 pt-1">
+                {(
+                  [
+                    {
+                      tier: 'Free Starter',
+                      price: '₹0',
+                      perks: '15 images, 3 videos, 5 audio daily · Standard FLUX & Gemini 3.1 Lite',
+                    },
+                    {
+                      tier: 'Pro Creator',
+                      price: '₹499 / mo or ₹4,999 / yr',
+                      perks: '250+ images, 50 videos · Full Hugging Face FLUX + PhotoRoom AI',
+                    },
+                    {
+                      tier: 'Super AI Enterprise',
+                      price: '₹9,999 / yr',
+                      perks: '10,000 images, 2,000 videos, VIP Concurrency · Unlimited workspace chats',
+                    },
+                  ]
+                ).map((plan) => {
+                  const isCurrent =
+                    currentUser.activeSubscription?.planName === plan.tier ||
+                    (!currentUser.activeSubscription && plan.tier === 'Free Starter');
+                  return (
+                    <div
+                      key={plan.tier}
+                      className={`p-3.5 rounded-2xl border ${
+                        isCurrent
+                          ? 'border-blue-500 bg-blue-600/15'
+                          : 'border-slate-800 bg-[#0B1020]'
+                      } flex items-center justify-between gap-3`}
+                    >
+                      <div>
+                        <div className="text-xs font-bold text-white">
+                          {plan.tier} · <span className="text-blue-300 font-mono">{plan.price}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-300 mt-0.5">
+                          {plan.perks}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onOpenSubscription) {
+                            onClose();
+                            onOpenSubscription();
+                          }
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold shrink-0 ${
+                          isCurrent
+                            ? 'bg-[#11192E] text-slate-300 border border-slate-700'
+                            : 'bg-blue-600 hover:bg-blue-500 text-white'
+                        }`}
+                      >
+                        {isCurrent ? 'Current' : 'View Plan'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 

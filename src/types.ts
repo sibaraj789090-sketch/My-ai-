@@ -142,7 +142,7 @@ export interface UserAccount {
   bio?: string;
   role: 'admin' | 'user';
   avatar: string;
-  tier: 'Free' | 'Pro' | 'Enterprise';
+  tier: 'Free' | 'Pro' | 'Enterprise' | string;
   generationLimits: {
     imagesRemaining: number;
     videosRemaining: number;
@@ -153,6 +153,7 @@ export interface UserAccount {
     totalAudioQuota: number;
   };
   preferences?: UserPreferences;
+  activeSubscription?: UserSubscription;
   createdAt: number;
   status: 'active' | 'suspended';
 }
@@ -182,6 +183,7 @@ export type ApiProviderProtocol =
   | 'google_gemini'
   | 'anthropic'
   | 'huggingface'
+  | 'photoroom'
   | 'custom_rest';
 
 export interface SanitizedApiProviderEntry {
@@ -206,6 +208,7 @@ export interface SanitizedApiProviderEntry {
   lastTestedAt?: number;
   lastTestLatencyMs?: number;
   lastTestMessage?: string;
+  lastErrorLog?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -309,4 +312,134 @@ export interface ProviderConfig {
   siteName: string;
   announcementBanner: string;
   maintenanceMode: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// SUBSCRIPTION & PAYMENT MANAGEMENT TYPES
+// -----------------------------------------------------------------------------
+
+export type PlanBillingCycle = 'monthly' | 'yearly' | 'custom' | 'lifetime' | 'free';
+
+export interface PlanLimits {
+  imagesQuota: number;
+  videosQuota: number;
+  audioQuota: number;
+  chatsQuota: number;
+}
+
+export interface SubscriptionPlan {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  priceINR: number;
+  billingCycle: PlanBillingCycle;
+  durationDays: number; // 0 = free/lifetime, 30 = monthly, 365 = yearly, or custom days
+  durationLabel: string; // e.g. "Monthly", "Yearly", "14 Days", "Lifetime"
+  tier: 'Free' | 'Pro' | 'Enterprise' | string;
+  features: string[];
+  limits: PlanLimits;
+  enabled: boolean;
+  isPopular?: boolean;
+  isRecommended?: boolean;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type PaymentMethodType = 'upi_qr' | 'upi_id' | 'bank_transfer' | 'cashfree';
+
+export interface PaymentSettings {
+  upiQr: {
+    enabled: boolean;
+    qrImageUrl: string;
+    upiId: string;
+    accountHolderName: string;
+    instructions?: string;
+  };
+  upiId: {
+    enabled: boolean;
+    upiId: string;
+    accountHolderName: string;
+    instructions?: string;
+  };
+  bankTransfer: {
+    enabled: boolean;
+    accountHolderName: string;
+    bankName: string;
+    accountNumber: string;
+    ifscCode: string;
+    branchName?: string;
+    instructions?: string;
+  };
+  cashfree: {
+    enabled: boolean;
+    environment: 'sandbox' | 'production';
+    appIdEnvVar?: string;
+    hasSecretKey?: boolean;
+    maskedSecret?: string;
+    webhookUrl?: string;
+  };
+  updatedAt: number;
+}
+
+export type PaymentOrderStatus = 'pending_verification' | 'approved' | 'rejected' | 'failed';
+
+export interface PaymentOrder {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  planId: string;
+  planName: string;
+  amountINR: number;
+  paymentMethod: PaymentMethodType;
+  status: PaymentOrderStatus;
+  referenceNumber: string;
+  userTransactionRef?: string;
+  userProofNotes?: string;
+  userProofScreenshotUrl?: string;
+  cashfreeOrderId?: string;
+  cashfreePaymentSessionId?: string;
+  rejectionReason?: string;
+  verifiedAt?: number;
+  verifiedBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PaymentTransaction {
+  id: string;
+  orderId: string;
+  userId: string;
+  userEmail: string;
+  planId: string;
+  amountINR: number;
+  paymentMethod: string;
+  gatewayStatus?: string;
+  gatewayTransactionId?: string;
+  rawGatewayResponse?: any;
+  createdAt: number;
+}
+
+export interface UserSubscription {
+  id: string;
+  userId: string;
+  userEmail: string;
+  planId: string;
+  planName: string;
+  tier: string;
+  amountPaidINR: number;
+  orderId?: string;
+  startDate: number;
+  expiryDate: number; // 0 for lifetime/free, timestamp for fixed period
+  status: 'active' | 'expired' | 'cancelled';
+  limitsGranted: {
+    images: number;
+    videos: number;
+    audio: number;
+    chats: number;
+  };
+  createdAt: number;
+  updatedAt: number;
 }

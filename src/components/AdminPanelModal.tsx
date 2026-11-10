@@ -14,8 +14,10 @@ import {
   Database,
   Save,
   KeyRound,
+  CreditCard,
 } from 'lucide-react';
 import { ApiManagementSection } from './ApiManagementSection';
+import { SubscriptionManagementSection } from './SubscriptionManagementSection';
 import {
   AIModelConfig,
   FeedbackEntry,
@@ -31,7 +33,15 @@ interface AdminPanelModalProps {
   onConfigUpdated: () => Promise<void>;
 }
 
-type AdminTab = 'dashboard' | 'users' | 'models' | 'api_management' | 'limits' | 'jobs' | 'website';
+type AdminTab =
+  | 'dashboard'
+  | 'users'
+  | 'models'
+  | 'api_management'
+  | 'subscription'
+  | 'limits'
+  | 'jobs'
+  | 'website';
 
 export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   isOpen,
@@ -191,6 +201,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     { id: 'users', label: 'Users', icon: Users },
     { id: 'models', label: 'Models & Providers', icon: Cpu },
     { id: 'api_management', label: 'API Management', icon: KeyRound },
+    { id: 'subscription', label: 'Subscription Management', icon: CreditCard },
     { id: 'limits', label: 'Limits & Costs', icon: Gauge },
     { id: 'jobs', label: 'Jobs & Feedback', icon: Activity },
     { id: 'website', label: 'Website', icon: Globe },
@@ -623,6 +634,13 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
           {!errorMsg && tab === 'api_management' && (
             <ApiManagementSection
+              onConfigUpdated={onConfigUpdated}
+              onNotice={(msg) => setNotice(msg)}
+            />
+          )}
+
+          {!errorMsg && tab === 'subscription' && (
+            <SubscriptionManagementSection
               onConfigUpdated={onConfigUpdated}
               onNotice={(msg) => setNotice(msg)}
             />

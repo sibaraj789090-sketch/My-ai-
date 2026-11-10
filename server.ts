@@ -21,6 +21,12 @@ import {
   testApiProviderConnection,
   executeCustomTextOrCodeProvider,
 } from './server/providerClient.js';
+import { setProviderSecret, deleteProviderSecret } from './server/secrets.js';
+import {
+  createCashfreeOrder,
+  verifyCashfreeOrder,
+  testCashfreeConnection,
+} from './server/cashfree.js';
 import { getSupabaseClient, testSupabaseConnection, uploadMediaToSupabase } from './server/supabase.js';
 import {
   ApiCapabilityCategory,
@@ -1968,6 +1974,9 @@ app.post('/api/admin/api-providers/test-draft', requireAdmin, async (req, res) =
       lastTestedAt: Date.now(),
       lastTestLatencyMs: result.latencyMs,
       lastTestMessage: result.message,
+      lastErrorLog: !result.connected
+        ? `[${new Date().toISOString()}] Test failed (HTTP ${result.httpStatus || 400}): ${result.message}`
+        : undefined,
     });
   }
   res.json(result);
@@ -1984,6 +1993,9 @@ app.post('/api/admin/api-providers/:id/test', requireAdmin, async (req, res) => 
     lastTestedAt: Date.now(),
     lastTestLatencyMs: result.latencyMs,
     lastTestMessage: result.message,
+    lastErrorLog: !result.connected
+      ? `[${new Date().toISOString()}] Test failed (HTTP ${result.httpStatus || 400}): ${result.message}`
+      : undefined,
   });
 
   res.json({
@@ -1998,6 +2010,459 @@ app.post('/api/admin/feature-assignments', requireAdmin, (req, res) => {
   res.json({
     success: true,
     featureAssignments: updated,
+  });
+});
+
+// -----------------------------------------------------------------------------
+// USER SUBSCRIPTION & CHECKOUT ENDPOINTS
+// -----------------------------------------------------------------------------
+
+app.get('/api/subscription/plans', (req, res) => {
+  const plans = db.getSubscriptionPlans(false);
+  res.json({ plans });
+});
+
+app.get('/api/subscription/payment-methods', (req, res) => {
+  const settings = db.getSanitizedPaymentSettings();
+  const availableMethods = [];
+  if (settings.upiQr.enabled) {
+    availableMethods.push({
+      type: 'upi_qr',
+      title: 'UPI QR Code',
+      description: 'Scan & pay with GPay, PhonePe, Paytm, BHIM',
+      qrImageUrl: settings.upiQr.qrImageUrl,
+      upiId: settings.upiQr.upiId,
+      accountHolderName: settings.upiQr.accountHolderName,
+      instructions: settings.upiQr.instructions,
+    });
+  }
+  if (settings.upiId.enabled) {
+    availableMethods.push({
+      type: 'upi_id',
+      title: 'Direct UPI ID',
+      description: 'Transfer directly to verified UPI ID',
+      upiId: settings.upiId.upiId,
+      accountHolderName: settings.upiId.accountHolderName,
+      instructions: settings.upiId.instructions,
+    });
+  }
+  if (settings.bankTransfer.enabled) {
+    availableMethods.push({
+      type: 'bank_transfer',
+      title: 'Bank Transfer (IMPS / NEFT)',
+      description: 'Direct wire transfer to bank account',
+      bankName: settings.bankTransfer.bankName,
+      accountNumber: settings.bankTransfer.accountNumber,
+      ifscCode: settings.bankTransfer.ifscCode,
+      accountHolderName: settings.bankTransfer.accountHolderName,
+      branchName: settings.bankTransfer.branchName,
+      instructions: settings.bankTransfer.instructions,
+    });
+  }
+  if (settings.cashfree.enabled) {
+    availableMethods.push({
+      type: 'cashfree',
+      title: 'Instant Online Payment (Cashfree)',
+      description: 'Cards, NetBanking, UPI instant activation',
+      environment: settings.cashfree.environment,
+      isConfigured: settings.cashfree.hasSecretKey,
+    });
+  }
+
+  res.json({
+    methods: availableMethods,
+    settings,
+  });
+});
+
+app.get('/api/subscription/my-status', (req, res) => {
+  const user = getActiveUser();
+  const activeSub = db.getUserActiveSubscription(user.id);
+  const now = Date.now();
+  const daysRemaining =
+    activeSub && activeSub.expiryDate > 0
+      ? Math.max(0, Math.ceil((activeSub.expiryDate - now) / (24 * 3600 * 1000)))
+      : activeSub && activeSub.expiryDate === 0
+      ? -1 // lifetime / permanent
+      : 0;
+
+  res.json({
+    user,
+    activeSubscription: activeSub,
+    daysRemaining,
+    limits: user.generationLimits,
+  });
+});
+
+app.get('/api/subscription/my-orders', (req, res) => {
+  const user = getActiveUser();
+  const orders = db.getPaymentOrders({ userId: user.id });
+  const subscriptions = db.getUserSubscriptions(user.id);
+  res.json({ orders, subscriptions });
+});
+
+app.post('/api/subscription/orders', async (req, res) => {
+  const user = getActiveUser();
+  const { planId, paymentMethod, userTransactionRef, userProofNotes, userProofScreenshotUrl } =
+    req.body || {};
+
+  if (!planId) {
+    return res.status(400).json({ error: 'Please select a subscription plan.' });
+  }
+
+  const plan = db.getSubscriptionPlan(planId);
+  if (!plan) {
+    return res.status(404).json({ error: 'Selected subscription plan does not exist.' });
+  }
+
+  const validMethods = ['upi_qr', 'upi_id', 'bank_transfer', 'cashfree'];
+  if (!validMethods.includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Invalid payment method selected.' });
+  }
+
+  // Free plan auto-activation
+  if (plan.priceINR === 0) {
+    const sub = db.activateUserSubscription(user.id, plan, 'free-plan-direct');
+    return res.json({
+      success: true,
+      freeActivated: true,
+      subscription: sub,
+      message: `${plan.name} has been activated on your account.`,
+    });
+  }
+
+  // Cashfree flow
+  if (paymentMethod === 'cashfree') {
+    const orderId = `cf_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const newOrder = db.createPaymentOrder({
+      id: orderId,
+      userId: user.id,
+      userEmail: user.email,
+      userName: user.name,
+      planId: plan.id,
+      planName: plan.name,
+      amountINR: plan.priceINR,
+      paymentMethod: 'cashfree',
+      status: 'pending_verification',
+      cashfreeOrderId: orderId,
+    });
+
+    const returnUrl = `${req.protocol}://${req.get('host')}/?cf_verify=${orderId}`;
+    const cfResult = await createCashfreeOrder({
+      orderId,
+      orderAmount: plan.priceINR,
+      orderCurrency: 'INR',
+      customerId: user.id,
+      customerName: user.name,
+      customerEmail: user.email,
+      returnUrl,
+    });
+
+    if (!cfResult.success) {
+      db.updatePaymentOrder(orderId, {
+        status: 'failed',
+        rejectionReason: cfResult.error || 'Failed to initialize Cashfree gateway order.',
+      });
+      return res.status(502).json({
+        error: cfResult.error || 'Unable to initialize Cashfree payment gateway session.',
+      });
+    }
+
+    db.updatePaymentOrder(orderId, {
+      cashfreePaymentSessionId: cfResult.paymentSessionId,
+    });
+
+    return res.json({
+      success: true,
+      order: db.getPaymentOrder(orderId),
+      paymentSessionId: cfResult.paymentSessionId,
+      cashfreeOrderId: orderId,
+    });
+  }
+
+  // Manual payment methods (UPI QR, UPI ID, Bank Transfer)
+  const order = db.createPaymentOrder({
+    userId: user.id,
+    userEmail: user.email,
+    userName: user.name,
+    planId: plan.id,
+    planName: plan.name,
+    amountINR: plan.priceINR,
+    paymentMethod,
+    status: 'pending_verification',
+    userTransactionRef: userTransactionRef?.trim() || '',
+    userProofNotes: userProofNotes?.trim() || '',
+    userProofScreenshotUrl: userProofScreenshotUrl || '',
+  });
+
+  res.json({
+    success: true,
+    order,
+    message: `Order #${order.referenceNumber} created. Submit your transaction UTR / Reference ID for verification.`,
+  });
+});
+
+app.post('/api/subscription/orders/:id/submit-proof', (req, res) => {
+  const user = getActiveUser();
+  const order = db.getPaymentOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+  if (order.userId !== user.id && user.role !== 'admin') {
+    return res.status(403).json({ error: 'Not authorized to update this order.' });
+  }
+
+  const { userTransactionRef, userProofNotes, userProofScreenshotUrl } = req.body || {};
+  if (!userTransactionRef?.trim() && !userProofNotes?.trim()) {
+    return res.status(400).json({ error: 'Please enter your transaction reference / UTR number.' });
+  }
+
+  const updated = db.updatePaymentOrder(order.id, {
+    userTransactionRef: userTransactionRef?.trim() || order.userTransactionRef,
+    userProofNotes: userProofNotes !== undefined ? userProofNotes : order.userProofNotes,
+    userProofScreenshotUrl:
+      userProofScreenshotUrl !== undefined ? userProofScreenshotUrl : order.userProofScreenshotUrl,
+    status: 'pending_verification',
+  });
+
+  res.json({
+    success: true,
+    order: updated,
+    message: 'Payment proof submitted. Admin will verify and activate your subscription.',
+  });
+});
+
+app.post('/api/subscription/orders/:id/verify-cashfree', async (req, res) => {
+  const order = db.getPaymentOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+  if (order.status === 'approved') {
+    return res.json({
+      success: true,
+      alreadyVerified: true,
+      order,
+      message: 'Order already verified and subscription is active.',
+    });
+  }
+
+  const cfOrderId = order.cashfreeOrderId || order.id;
+  const verifyResult = await verifyCashfreeOrder(cfOrderId);
+
+  if (verifyResult.isPaid) {
+    const approval = db.approvePaymentOrder(order.id, 'cashfree_gateway');
+    return res.json({
+      success: true,
+      isPaid: true,
+      order: approval.order,
+      subscription: approval.subscription,
+      message: 'Cashfree payment verified successfully! Your subscription is now active.',
+    });
+  }
+
+  res.json({
+    success: false,
+    isPaid: false,
+    orderStatus: verifyResult.status,
+    message: `Payment status is "${verifyResult.status}". Subscription not activated.`,
+  });
+});
+
+app.post('/api/subscription/cashfree-webhook', async (req, res) => {
+  try {
+    const event = req.body;
+    const orderData = event?.data?.order || event?.order || {};
+    const orderId = orderData?.order_id;
+    if (!orderId) {
+      return res.status(200).send('No order_id in event');
+    }
+
+    const order = (db.getPaymentOrders() || []).find(
+      (o) => o.cashfreeOrderId === orderId || o.id === orderId
+    );
+    if (!order) {
+      return res.status(200).send('Order not tracked');
+    }
+
+    if (order.status === 'approved') {
+      return res.status(200).send('Already approved');
+    }
+
+    const verify = await verifyCashfreeOrder(orderId);
+    if (verify.isPaid) {
+      db.approvePaymentOrder(order.id, 'cashfree_webhook');
+      console.log(`[Cashfree Webhook] Approved order ${order.id} for user ${order.userEmail}`);
+    }
+    res.status(200).json({ received: true });
+  } catch (err: any) {
+    console.error('[Cashfree Webhook] Error:', err);
+    res.status(200).json({ error: err?.message || 'Webhook processing failed' });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// ADMIN PANEL: SUBSCRIPTION MANAGEMENT ENDPOINTS (Strictly Protected)
+// -----------------------------------------------------------------------------
+
+app.get('/api/admin/subscription/plans', requireAdmin, (req, res) => {
+  res.json({ plans: db.getSubscriptionPlans(true) });
+});
+
+app.post('/api/admin/subscription/plans', requireAdmin, (req, res) => {
+  const { name, title, description, priceINR, billingCycle, durationDays, durationLabel, tier, features, limits, enabled, isPopular, isRecommended, sortOrder } = req.body || {};
+  if (!name?.trim()) {
+    return res.status(400).json({ error: 'Plan name is required.' });
+  }
+
+  const created = db.createSubscriptionPlan({
+    name,
+    title,
+    description,
+    priceINR,
+    billingCycle,
+    durationDays,
+    durationLabel,
+    tier,
+    features,
+    limits,
+    enabled,
+    isPopular,
+    isRecommended,
+    sortOrder,
+  });
+
+  res.json({
+    success: true,
+    plan: created,
+    plans: db.getSubscriptionPlans(true),
+  });
+});
+
+app.patch('/api/admin/subscription/plans/:id', requireAdmin, (req, res) => {
+  const updated = db.updateSubscriptionPlan(req.params.id, req.body || {});
+  if (!updated) return res.status(404).json({ error: 'Subscription plan not found.' });
+  res.json({
+    success: true,
+    plan: updated,
+    plans: db.getSubscriptionPlans(true),
+  });
+});
+
+app.delete('/api/admin/subscription/plans/:id', requireAdmin, (req, res) => {
+  const deleted = db.deleteSubscriptionPlan(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'Subscription plan not found.' });
+  res.json({
+    success: true,
+    plans: db.getSubscriptionPlans(true),
+  });
+});
+
+app.get('/api/admin/subscription/payment-settings', requireAdmin, (req, res) => {
+  res.json({ settings: db.getSanitizedPaymentSettings() });
+});
+
+app.post('/api/admin/subscription/payment-settings', requireAdmin, (req, res) => {
+  const { upiQr, upiId, bankTransfer, cashfree } = req.body || {};
+
+  // Store Cashfree secret key securely in server secrets store if provided
+  if (cashfree?.secretKey && cashfree.secretKey.trim()) {
+    setProviderSecret('cashfree', cashfree.secretKey.trim());
+  }
+  if (cashfree?.appId && cashfree.appId.trim()) {
+    setProviderSecret('cashfree_app_id', cashfree.appId.trim());
+  }
+
+  const updated = db.updatePaymentSettings({
+    upiQr,
+    upiId,
+    bankTransfer,
+    cashfree: cashfree
+      ? {
+          enabled: cashfree.enabled,
+          environment: cashfree.environment,
+          appIdEnvVar: cashfree.appIdEnvVar,
+          webhookUrl: cashfree.webhookUrl,
+        }
+      : undefined,
+  });
+
+  res.json({
+    success: true,
+    settings: updated,
+  });
+});
+
+app.post('/api/admin/subscription/test-cashfree', requireAdmin, async (req, res) => {
+  const { appId, secretKey, environment } = req.body || {};
+  const result = await testCashfreeConnection({
+    appId,
+    secretKey,
+    environment,
+  });
+  res.json(result);
+});
+
+app.get('/api/admin/subscription/orders', requireAdmin, (req, res) => {
+  const { userId, status } = req.query as { userId?: string; status?: string };
+  const orders = db.getPaymentOrders({ userId, status });
+  res.json({ orders });
+});
+
+app.post('/api/admin/subscription/orders/:id/approve', requireAdmin, (req, res) => {
+  const user = getActiveUser();
+  const result = db.approvePaymentOrder(req.params.id, user.email);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json({
+    success: true,
+    order: result.order,
+    subscription: result.subscription,
+    orders: db.getPaymentOrders(),
+  });
+});
+
+app.post('/api/admin/subscription/orders/:id/reject', requireAdmin, (req, res) => {
+  const user = getActiveUser();
+  const { reason } = req.body || {};
+  const result = db.rejectPaymentOrder(req.params.id, reason, user.email);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json({
+    success: true,
+    order: result.order,
+    orders: db.getPaymentOrders(),
+  });
+});
+
+app.get('/api/admin/subscription/subscriptions', requireAdmin, (req, res) => {
+  const users = db.getUsers();
+  const activeSubs = users
+    .map((u) => ({
+      user: u,
+      subscription: db.getUserActiveSubscription(u.id),
+      allSubscriptions: db.getUserSubscriptions(u.id),
+    }))
+    .filter((entry) => !!entry.subscription || entry.allSubscriptions.length > 0);
+
+  res.json({ userSubscriptions: activeSubs });
+});
+
+app.post('/api/admin/subscription/manual-grant', requireAdmin, (req, res) => {
+  const admin = getActiveUser();
+  const { userId, planId, durationDays } = req.body || {};
+  if (!userId || !planId) {
+    return res.status(400).json({ error: 'User ID and Plan ID are required.' });
+  }
+
+  const result = db.manualGrantSubscription(userId, planId, durationDays, admin.email);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  res.json({
+    success: true,
+    user: result.user,
+    subscription: result.subscription,
   });
 });
 

@@ -21,6 +21,7 @@ import { LibraryModal } from './components/LibraryModal';
 import { AccountModal } from './components/AccountModal';
 import { SettingsModal, SettingsSectionKey } from './components/SettingsModal';
 import { AdminPanelModal } from './components/AdminPanelModal';
+import { SubscriptionModal } from './components/SubscriptionModal';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
@@ -67,6 +68,7 @@ export default function App() {
     section: SettingsSectionKey;
   }>({ open: false, section: 'main' });
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isSubscriptionOpen, setIsSubscriptionOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
 
   // Enforce dark theme across the entire app
@@ -736,6 +738,7 @@ export default function App() {
         onOpenAccount={() => setIsAccountOpen(true)}
         onOpenSettings={() => setSettingsState({ open: true, section: 'main' })}
         onOpenAdmin={() => setIsAdminOpen(true)}
+        onOpenSubscription={() => setIsSubscriptionOpen(true)}
         currentUser={currentUser}
       />
 
@@ -781,6 +784,7 @@ export default function App() {
           onUserUpdated={setCurrentUser}
           onWorkspaceReload={loadWorkspace}
           onOpenSettings={() => setSettingsState({ open: true, section: 'main' })}
+          onOpenSubscription={() => setIsSubscriptionOpen(true)}
         />
       )}
 
@@ -819,6 +823,14 @@ export default function App() {
         isOpen={isAdminOpen}
         onClose={() => setIsAdminOpen(false)}
         onConfigUpdated={loadWorkspace}
+      />
+
+      {/* Premium Subscription & Checkout Modal */}
+      <SubscriptionModal
+        isOpen={isSubscriptionOpen}
+        onClose={() => setIsSubscriptionOpen(false)}
+        currentUser={currentUser}
+        onWorkspaceReload={loadWorkspace}
       />
     </div>
   );

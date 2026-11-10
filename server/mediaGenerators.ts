@@ -518,7 +518,7 @@ function validateAndDetectImageMime(buf: Buffer, headerMime?: string | null): st
   return null;
 }
 
-function aspectRatioToDimensions(aspectRatio: string, maxDim = 1024): { width: number; height: number } {
+export function aspectRatioToDimensions(aspectRatio: string, maxDim = 1024): { width: number; height: number } {
   if (maxDim <= 640) {
     // AI Horde anonymous tier caps dimensions cleanly around 512x512 - 640x384
     switch (aspectRatio) {
@@ -548,7 +548,7 @@ function aspectRatioToDimensions(aspectRatio: string, maxDim = 1024): { width: n
   }
 }
 
-async function synthesizeEditPromptWithGemini(
+export async function synthesizeEditPromptWithGemini(
   sourceImages: Array<{ data: string; mimeType: string }>,
   editInstruction: string
 ): Promise<string> {
@@ -562,8 +562,8 @@ async function synthesizeEditPromptWithGemini(
     parts.push({
       text:
         sourceImages.length > 1
-          ? `Describe each of these ${sourceImages.length} images in visual detail (subjects, style, lighting, colors, composition), then combine/edit them according to this instruction: "${editInstruction}". Return ONLY a single clean image-generation prompt describing the final combined/edited image.`
-          : `Describe this image in rich visual detail (subject, pose, style, lighting, colors, composition), then seamlessly apply this requested edit: "${editInstruction}". Return ONLY a single clean image-generation prompt describing the final edited image.`,
+          ? `Describe each of these ${sourceImages.length} images in visual detail (identifying key persons/subjects, distinct poses, natural styling, and lighting). Then generate a unified photorealistic prompt to combine/edit them according to this user request: "${editInstruction}". CRITICAL: Preserve the original subjects' identities, facial features, proportions, and natural appearance from the source photos so they look authentic in the combined frame. Return ONLY a single clean image prompt.`
+          : `Describe this image in rich visual detail (subject, pose, styling, and natural lighting). Then seamlessly apply this requested photo edit: "${editInstruction}". CRITICAL: Preserve the original subject's identity, key features, and authentic appearance while applying the requested changes naturally. Return ONLY a single clean image prompt.`,
     });
     const res = await withTimeout(
       ai.models.generateContent({
@@ -789,18 +789,67 @@ export async function generateAIImage(options: {
   if (assignedProviderId && assignedProviderId !== 'built-in') {
     const customProvider = db.getApiProvider(assignedProviderId);
     if (customProvider && customProvider.enabled) {
-      const customResult = await executeCustomImageOrEditProvider(customProvider, {
-        prompt,
-        sourceImages: allSourceImages,
-        aspectRatio,
-        quality,
-      });
-      return {
-        imageUrl: customResult.imageUrl,
-        prompt,
-        model: customResult.modelLabel,
-        textNote: customResult.textNote,
-      };
+      try {
+        const customResult = await executeCustomImageOrEditProvider(customProvider, {
+          prompt,
+          sourceImages: allSourceImages,
+          aspectRatio,
+          quality,
+        });
+        return {
+          imageUrl: customResult.imageUrl,
+          prompt,
+          model: customResult.modelLabel,
+          textNote: customResult.textNote,
+        };
+      } catch (err: any) {
+        console.warn(`Primary provider "${customProvider.name}" failed:`, err?.message);
+        db.updateApiProvider(customProvider.id, {
+          lastTestStatus: 'failed',
+          lastTestedAt: Date.now(),
+          lastTestMessage: err?.message || 'Execution error',
+          lastErrorLog: `[${new Date().toISOString()}] Generation error: ${err?.message || String(err)}`,
+        });
+
+        // Manual/automatic fallback to another enabled provider
+        const otherEnabled = db
+          .getApiProviders()
+          .filter(
+            (p) =>
+              p.id !== customProvider.id &&
+              p.enabled &&
+              (allSourceImages.length > 0
+                ? p.category === 'image_edit' || p.category === 'image'
+                : p.category === 'image')
+          );
+
+        for (const altProvider of otherEnabled) {
+          try {
+            console.log(`Attempting fallback to enabled provider: "${altProvider.name}"`);
+            const altResult = await executeCustomImageOrEditProvider(altProvider, {
+              prompt,
+              sourceImages: allSourceImages,
+              aspectRatio,
+              quality,
+            });
+            return {
+              imageUrl: altResult.imageUrl,
+              prompt,
+              model: `${altResult.modelLabel} (Fallback from ${customProvider.name})`,
+              textNote:
+                altResult.textNote ||
+                `Primary provider "${customProvider.name}" encountered an error (${err?.message || 'unavailable'}). Automatically completed using fallback provider "${altProvider.name}".`,
+            };
+          } catch (altErr: any) {
+            console.warn(`Fallback provider "${altProvider.name}" also failed:`, altErr?.message);
+            db.updateApiProvider(altProvider.id, {
+              lastErrorLog: `[${new Date().toISOString()}] Fallback failed: ${altErr?.message || String(altErr)}`,
+            });
+          }
+        }
+
+        console.log(`Falling back to built-in Free Image / Gemini Vision pipeline.`);
+      }
     } else if (preferredModel?.startsWith('custom:')) {
       throw new ProviderError(
         `Selected API provider "${customProvider?.name || assignedProviderId}" is currently disabled. Enable it in Admin Panel → API Management or select "Auto".`

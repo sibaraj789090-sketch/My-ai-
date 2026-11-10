@@ -15,11 +15,17 @@ import {
   ApiProviderProtocol,
   SanitizedApiProviderEntry,
   FeatureProviderAssignments,
+  SubscriptionPlan,
+  PaymentSettings,
+  PaymentOrder,
+  PaymentTransaction,
+  UserSubscription,
 } from '../src/types.js';
 import {
   setProviderSecret,
   deleteProviderSecret,
   getProviderSecretStatus,
+  resolveProviderSecret,
 } from './secrets.js';
 
 export interface ApiProviderRecord {
@@ -41,6 +47,7 @@ export interface ApiProviderRecord {
   lastTestedAt?: number;
   lastTestLatencyMs?: number;
   lastTestMessage?: string;
+  lastErrorLog?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -93,9 +100,177 @@ export interface DatabaseSchema {
   publicLinks: PublicLinkItem[];
   apiProviders?: ApiProviderRecord[];
   featureAssignments?: FeatureProviderAssignments;
+  subscriptionPlans?: SubscriptionPlan[];
+  paymentSettings?: PaymentSettings;
+  paymentOrders?: PaymentOrder[];
+  paymentTransactions?: PaymentTransaction[];
+  userSubscriptions?: UserSubscription[];
   config: ServerProviderSecrets;
   stats: SystemStats;
 }
+
+const DEFAULT_SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
+  {
+    id: 'plan_free',
+    name: 'Free Starter',
+    title: 'Essential AI for everyday use',
+    description: 'Access Gemini 3.1 Flash Lite, standard FLUX image gen, and basic tools.',
+    priceINR: 0,
+    billingCycle: 'free',
+    durationDays: 0,
+    durationLabel: 'Free Forever',
+    tier: 'Free',
+    features: [
+      '15 AI photo generations per day',
+      '3 video generations per day (720p)',
+      '5 AI audio & song generations per day',
+      '100 chat messages per day',
+      'Standard model speed & standard support',
+    ],
+    limits: {
+      imagesQuota: 15,
+      videosQuota: 3,
+      audioQuota: 5,
+      chatsQuota: 100,
+    },
+    enabled: true,
+    isPopular: false,
+    isRecommended: false,
+    sortOrder: 1,
+    createdAt: Date.now() - 30 * 24 * 3600 * 1000,
+    updatedAt: Date.now() - 30 * 24 * 3600 * 1000,
+  },
+  {
+    id: 'plan_pro_monthly',
+    name: 'Pro Creator (Monthly)',
+    title: 'Powerful AI for creators & professionals',
+    description: 'Unlock 4K media, Hugging Face FLUX & PhotoRoom editing, and priority queue.',
+    priceINR: 499,
+    billingCycle: 'monthly',
+    durationDays: 30,
+    durationLabel: 'Month',
+    tier: 'Pro',
+    features: [
+      '250 AI photo generations per month',
+      '50 high-res video generations (1080p)',
+      '60 AI audio & musical track generations',
+      '1,000 deep chat & coding queries',
+      'Full Hugging Face FLUX & PhotoRoom AI editing',
+      'Subject preservation & multi-photo composition',
+      'Priority generation queue & 2x processing speed',
+    ],
+    limits: {
+      imagesQuota: 250,
+      videosQuota: 50,
+      audioQuota: 60,
+      chatsQuota: 1000,
+    },
+    enabled: true,
+    isPopular: true,
+    isRecommended: false,
+    sortOrder: 2,
+    createdAt: Date.now() - 20 * 24 * 3600 * 1000,
+    updatedAt: Date.now() - 20 * 24 * 3600 * 1000,
+  },
+  {
+    id: 'plan_pro_yearly',
+    name: 'Pro Creator (Yearly)',
+    title: 'Best Value · Save 20% on annual billing',
+    description: 'Full year of unlimited Pro creation power with maximum quota.',
+    priceINR: 4999,
+    billingCycle: 'yearly',
+    durationDays: 365,
+    durationLabel: 'Year',
+    tier: 'Pro',
+    features: [
+      'All Pro Creator features included',
+      '3,500 AI photo generations per year',
+      '700 video generations (1080p & 4K)',
+      '800 musical track & speech generations',
+      'Full Hugging Face + PhotoRoom priority routing',
+      'VIP Priority Support & Early Beta feature access',
+    ],
+    limits: {
+      imagesQuota: 3500,
+      videosQuota: 700,
+      audioQuota: 800,
+      chatsQuota: 15000,
+    },
+    enabled: true,
+    isPopular: false,
+    isRecommended: true,
+    sortOrder: 3,
+    createdAt: Date.now() - 15 * 24 * 3600 * 1000,
+    updatedAt: Date.now() - 15 * 24 * 3600 * 1000,
+  },
+  {
+    id: 'plan_enterprise',
+    name: 'Super AI Enterprise',
+    title: 'Unlimited creative studio for teams & studios',
+    description: 'Maximum concurrency, Gemini 4 Argon, custom model routing & unlimited quotas.',
+    priceINR: 9999,
+    billingCycle: 'yearly',
+    durationDays: 365,
+    durationLabel: 'Year',
+    tier: 'Enterprise',
+    features: [
+      'Unlimited multimodal chat & coding reasoning',
+      '10,000 AI photo generations',
+      '2,000 cinematic video generations',
+      '2,000 Lyria music & audio generations',
+      'Dedicated API endpoints & high concurrency',
+      'Custom model weights and fine-tuning support',
+      '24/7 dedicated support engineer',
+    ],
+    limits: {
+      imagesQuota: 10000,
+      videosQuota: 2000,
+      audioQuota: 2000,
+      chatsQuota: 99999,
+    },
+    enabled: true,
+    isPopular: false,
+    isRecommended: false,
+    sortOrder: 4,
+    createdAt: Date.now() - 10 * 24 * 3600 * 1000,
+    updatedAt: Date.now() - 10 * 24 * 3600 * 1000,
+  },
+];
+
+const DEFAULT_PAYMENT_SETTINGS: PaymentSettings = {
+  upiQr: {
+    enabled: true,
+    qrImageUrl: '',
+    upiId: 'myai@icici',
+    accountHolderName: 'MY AI Technologies',
+    instructions:
+      'Scan the QR code using any UPI app (GPay, PhonePe, Paytm, BHIM) and submit your 12-digit transaction UTR / Reference ID below.',
+  },
+  upiId: {
+    enabled: true,
+    upiId: 'myai@icici',
+    accountHolderName: 'MY AI Technologies',
+    instructions:
+      'Copy the official UPI ID above, transfer the exact plan amount from your bank or UPI app, and enter the transaction reference / UTR below.',
+  },
+  bankTransfer: {
+    enabled: true,
+    accountHolderName: 'MY AI Technologies Pvt Ltd',
+    bankName: 'HDFC Bank',
+    accountNumber: '50200088991122',
+    ifscCode: 'HDFC0001234',
+    branchName: 'Koramangala Branch, Bengaluru',
+    instructions:
+      'Transfer the amount via IMPS / NEFT / RTGS using the bank details above. After transferring, enter your bank transaction reference number below.',
+  },
+  cashfree: {
+    enabled: false,
+    environment: 'sandbox',
+    appIdEnvVar: 'CASHFREE_APP_ID',
+    webhookUrl: '/api/subscription/cashfree-webhook',
+  },
+  updatedAt: Date.now(),
+};
 
 const DEFAULT_PREFERENCES = (email: string): UserPreferences => ({
   theme: 'dark',
@@ -268,6 +443,57 @@ class Database {
 
   constructor() {
     this.data = this.loadData();
+    this.ensureDefaultProviders();
+  }
+
+  ensureDefaultProviders(): void {
+    if (!Array.isArray(this.data.apiProviders)) {
+      this.data.apiProviders = [];
+    }
+    let changed = false;
+    if (!this.data.apiProviders.some((p) => p.id === 'hf-default' || p.providerType === 'huggingface')) {
+      this.data.apiProviders.push({
+        id: 'hf-default',
+        name: 'Hugging Face',
+        category: 'image',
+        providerType: 'huggingface',
+        apiUrl: 'https://router.huggingface.co',
+        modelName: 'black-forest-labs/FLUX.1-schnell',
+        apiKeyEnvVar: 'HF_TOKEN',
+        authHeader: 'Authorization',
+        authPrefix: 'Bearer ',
+        timeoutMs: 45000,
+        notes: 'Hugging Face router for text-to-image and image editing models.',
+        enabled: false,
+        lastTestStatus: 'untested',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      changed = true;
+    }
+    if (!this.data.apiProviders.some((p) => p.id === 'photoroom-default' || p.providerType === 'photoroom')) {
+      this.data.apiProviders.push({
+        id: 'photoroom-default',
+        name: 'PhotoRoom',
+        category: 'image_edit',
+        providerType: 'photoroom',
+        apiUrl: 'https://image-api.photoroom.com/v2/edit',
+        modelName: 'photoroom-v2-edit',
+        apiKeyEnvVar: 'PHOTOROOM_API_KEY',
+        authHeader: 'x-api-key',
+        authPrefix: '',
+        timeoutMs: 35000,
+        notes: 'PhotoRoom official API for background removal and prompt-based scene editing.',
+        enabled: false,
+        lastTestStatus: 'untested',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      changed = true;
+    }
+    if (changed) {
+      this.saveData();
+    }
   }
 
   private loadData(): DatabaseSchema {
@@ -307,6 +533,11 @@ class Database {
       publicLinks: [],
       apiProviders: [],
       featureAssignments: { ...DEFAULT_FEATURE_ASSIGNMENTS },
+      subscriptionPlans: [...DEFAULT_SUBSCRIPTION_PLANS],
+      paymentSettings: { ...DEFAULT_PAYMENT_SETTINGS },
+      paymentOrders: [],
+      paymentTransactions: [],
+      userSubscriptions: [],
       config: {
         supabaseUrl: process.env.SUPABASE_URL || '',
         supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
@@ -395,11 +626,75 @@ class Database {
       notebooks: parsed.notebooks || [],
       feedback: parsed.feedback || [],
       publicLinks: parsed.publicLinks || [],
-      apiProviders: Array.isArray(parsed.apiProviders) ? parsed.apiProviders : [],
+      apiProviders: (() => {
+        const list: ApiProviderRecord[] = Array.isArray(parsed.apiProviders) ? [...parsed.apiProviders] : [];
+        if (!list.some((p) => p.id === 'hf-default' || p.providerType === 'huggingface')) {
+          list.push({
+            id: 'hf-default',
+            name: 'Hugging Face',
+            category: 'image',
+            providerType: 'huggingface',
+            apiUrl: 'https://router.huggingface.co',
+            modelName: 'black-forest-labs/FLUX.1-schnell',
+            apiKeyEnvVar: 'HF_TOKEN',
+            authHeader: 'Authorization',
+            authPrefix: 'Bearer ',
+            timeoutMs: 45000,
+            notes: 'Hugging Face router for text-to-image and image editing models.',
+            enabled: false,
+            lastTestStatus: 'untested',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+        if (!list.some((p) => p.id === 'photoroom-default' || p.providerType === 'photoroom')) {
+          list.push({
+            id: 'photoroom-default',
+            name: 'PhotoRoom',
+            category: 'image_edit',
+            providerType: 'photoroom',
+            apiUrl: 'https://image-api.photoroom.com/v2/edit',
+            modelName: 'photoroom-v2-edit',
+            apiKeyEnvVar: 'PHOTOROOM_API_KEY',
+            authHeader: 'x-api-key',
+            authPrefix: '',
+            timeoutMs: 35000,
+            notes: 'PhotoRoom official API for background removal and prompt-based scene editing.',
+            enabled: false,
+            lastTestStatus: 'untested',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+        return list;
+      })(),
       featureAssignments: {
         ...DEFAULT_FEATURE_ASSIGNMENTS,
         ...(parsed.featureAssignments || {}),
       },
+      subscriptionPlans:
+        Array.isArray(parsed.subscriptionPlans) && parsed.subscriptionPlans.length > 0
+          ? parsed.subscriptionPlans
+          : [...DEFAULT_SUBSCRIPTION_PLANS],
+      paymentSettings: parsed.paymentSettings
+        ? {
+            ...DEFAULT_PAYMENT_SETTINGS,
+            ...parsed.paymentSettings,
+            upiQr: { ...DEFAULT_PAYMENT_SETTINGS.upiQr, ...(parsed.paymentSettings.upiQr || {}) },
+            upiId: { ...DEFAULT_PAYMENT_SETTINGS.upiId, ...(parsed.paymentSettings.upiId || {}) },
+            bankTransfer: {
+              ...DEFAULT_PAYMENT_SETTINGS.bankTransfer,
+              ...(parsed.paymentSettings.bankTransfer || {}),
+            },
+            cashfree: {
+              ...DEFAULT_PAYMENT_SETTINGS.cashfree,
+              ...(parsed.paymentSettings.cashfree || {}),
+            },
+          }
+        : { ...DEFAULT_PAYMENT_SETTINGS },
+      paymentOrders: Array.isArray(parsed.paymentOrders) ? parsed.paymentOrders : [],
+      paymentTransactions: Array.isArray(parsed.paymentTransactions) ? parsed.paymentTransactions : [],
+      userSubscriptions: Array.isArray(parsed.userSubscriptions) ? parsed.userSubscriptions : [],
       config: {
         supabaseUrl: parsed.config?.supabaseUrl || process.env.SUPABASE_URL || '',
         supabaseAnonKey: parsed.config?.supabaseAnonKey || process.env.SUPABASE_ANON_KEY || '',
@@ -450,15 +745,33 @@ class Database {
 
   // Users
   getUsers(): UserAccount[] {
-    return this.data.users;
+    return this.data.users.map((u) => {
+      const activeSubscription = this.getUserActiveSubscription(u.id);
+      return {
+        ...u,
+        activeSubscription: activeSubscription || undefined,
+      };
+    });
   }
 
   getUser(id: string): UserAccount | undefined {
-    return this.data.users.find((u) => u.id === id);
+    const user = this.data.users.find((u) => u.id === id);
+    if (!user) return undefined;
+    const activeSubscription = this.getUserActiveSubscription(user.id);
+    return {
+      ...user,
+      activeSubscription: activeSubscription || undefined,
+    };
   }
 
   getUserByEmail(email: string): UserAccount | undefined {
-    return this.data.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+    const user = this.data.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+    if (!user) return undefined;
+    const activeSubscription = this.getUserActiveSubscription(user.id);
+    return {
+      ...user,
+      activeSubscription: activeSubscription || undefined,
+    };
   }
 
   createUser(user: UserAccount): UserAccount {
@@ -578,13 +891,14 @@ class Database {
         const m = msgs[i];
         const isPendingOrStreaming = m.status === 'pending' || m.status === 'streaming';
         const hasActiveJob = m.jobId ? activeJobIds.has(m.jobId) : false;
-        const isStale = now - (m.timestamp || 0) > 90_000 || activeJobIds.size === 0;
-        if (isPendingOrStreaming && !hasActiveJob && isStale) {
+        // Never interrupt active or recently-started requests. Only recover messages older than 2 minutes without an active worker job.
+        const isStale = !hasActiveJob && now - (m.timestamp || 0) > 120_000;
+        if (isPendingOrStreaming && isStale) {
           msgs[i] = {
             ...m,
             status: 'error',
-            error: m.error || 'This response was interrupted before completing. Please send your message again.',
-            content: m.content || 'This response was interrupted before completing. Please send your message again.',
+            error: m.error || 'This request timed out before completing. Please send your message again.',
+            content: m.content || 'This request timed out before completing. Please send your message again.',
           };
           fixed += 1;
         }
@@ -941,6 +1255,485 @@ class Database {
     this.saveData();
     return next;
   }
+
+  // ---------------------------------------------------------------------------
+  // SUBSCRIPTION PLANS
+  // ---------------------------------------------------------------------------
+
+  getSubscriptionPlans(includeDisabled = false): SubscriptionPlan[] {
+    if (!Array.isArray(this.data.subscriptionPlans) || this.data.subscriptionPlans.length === 0) {
+      this.data.subscriptionPlans = [...DEFAULT_SUBSCRIPTION_PLANS];
+      this.saveData();
+    }
+    const plans = includeDisabled
+      ? this.data.subscriptionPlans
+      : this.data.subscriptionPlans.filter((p) => p.enabled);
+    return [...plans].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  }
+
+  getSubscriptionPlan(id: string): SubscriptionPlan | undefined {
+    const plans = this.getSubscriptionPlans(true);
+    return plans.find((p) => p.id === id);
+  }
+
+  createSubscriptionPlan(data: Partial<SubscriptionPlan>): SubscriptionPlan {
+    const plans = this.getSubscriptionPlans(true);
+    const now = Date.now();
+    const id = data.id?.trim() || `plan_${now}_${Math.random().toString(36).substring(2, 7)}`;
+    const newPlan: SubscriptionPlan = {
+      id,
+      name: data.name?.trim() || 'New Plan',
+      title: data.title?.trim() || '',
+      description: data.description?.trim() || '',
+      priceINR: typeof data.priceINR === 'number' ? Math.max(0, data.priceINR) : 0,
+      billingCycle: data.billingCycle || 'monthly',
+      durationDays:
+        typeof data.durationDays === 'number'
+          ? Math.max(0, data.durationDays)
+          : data.billingCycle === 'yearly'
+          ? 365
+          : data.billingCycle === 'monthly'
+          ? 30
+          : 0,
+      durationLabel:
+        data.durationLabel?.trim() ||
+        (data.billingCycle === 'yearly'
+          ? 'Year'
+          : data.billingCycle === 'monthly'
+          ? 'Month'
+          : data.billingCycle === 'free'
+          ? 'Free Forever'
+          : `${data.durationDays || 30} Days`),
+      tier: data.tier || 'Pro',
+      features: Array.isArray(data.features) && data.features.length > 0 ? data.features : ['Standard Access'],
+      limits: {
+        imagesQuota: data.limits?.imagesQuota ?? 100,
+        videosQuota: data.limits?.videosQuota ?? 25,
+        audioQuota: data.limits?.audioQuota ?? 40,
+        chatsQuota: data.limits?.chatsQuota ?? 1000,
+      },
+      enabled: data.enabled ?? true,
+      isPopular: !!data.isPopular,
+      isRecommended: !!data.isRecommended,
+      sortOrder: typeof data.sortOrder === 'number' ? data.sortOrder : plans.length + 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (!Array.isArray(this.data.subscriptionPlans)) {
+      this.data.subscriptionPlans = [];
+    }
+    this.data.subscriptionPlans.push(newPlan);
+    this.saveData();
+    return newPlan;
+  }
+
+  updateSubscriptionPlan(id: string, updates: Partial<SubscriptionPlan>): SubscriptionPlan | null {
+    const plans = this.getSubscriptionPlans(true);
+    const idx = plans.findIndex((p) => p.id === id);
+    if (idx === -1) return null;
+
+    const existing = plans[idx];
+    const updated: SubscriptionPlan = {
+      ...existing,
+      ...updates,
+      priceINR: updates.priceINR !== undefined ? Math.max(0, Number(updates.priceINR)) : existing.priceINR,
+      durationDays:
+        updates.durationDays !== undefined ? Math.max(0, Number(updates.durationDays)) : existing.durationDays,
+      limits: updates.limits
+        ? {
+            imagesQuota: updates.limits.imagesQuota ?? existing.limits.imagesQuota,
+            videosQuota: updates.limits.videosQuota ?? existing.limits.videosQuota,
+            audioQuota: updates.limits.audioQuota ?? existing.limits.audioQuota,
+            chatsQuota: updates.limits.chatsQuota ?? existing.limits.chatsQuota,
+          }
+        : existing.limits,
+      features: Array.isArray(updates.features) ? updates.features : existing.features,
+      updatedAt: Date.now(),
+    };
+
+    plans[idx] = updated;
+    this.data.subscriptionPlans = plans;
+    this.saveData();
+    return updated;
+  }
+
+  deleteSubscriptionPlan(id: string): boolean {
+    const plans = this.getSubscriptionPlans(true);
+    const before = plans.length;
+    this.data.subscriptionPlans = plans.filter((p) => p.id !== id);
+    if (this.data.subscriptionPlans.length !== before) {
+      this.saveData();
+      return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PAYMENT SETTINGS
+  // ---------------------------------------------------------------------------
+
+  getPaymentSettings(): PaymentSettings {
+    if (!this.data.paymentSettings) {
+      this.data.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS };
+      this.saveData();
+    }
+    return {
+      ...DEFAULT_PAYMENT_SETTINGS,
+      ...this.data.paymentSettings,
+      upiQr: { ...DEFAULT_PAYMENT_SETTINGS.upiQr, ...(this.data.paymentSettings.upiQr || {}) },
+      upiId: { ...DEFAULT_PAYMENT_SETTINGS.upiId, ...(this.data.paymentSettings.upiId || {}) },
+      bankTransfer: {
+        ...DEFAULT_PAYMENT_SETTINGS.bankTransfer,
+        ...(this.data.paymentSettings.bankTransfer || {}),
+      },
+      cashfree: {
+        ...DEFAULT_PAYMENT_SETTINGS.cashfree,
+        ...(this.data.paymentSettings.cashfree || {}),
+      },
+    };
+  }
+
+  getSanitizedPaymentSettings(): PaymentSettings {
+    const raw = this.getPaymentSettings();
+    const { key: cfSecret } = resolveProviderSecret('cashfree', 'CASHFREE_SECRET_KEY');
+    const hasSecretKey = !!cfSecret;
+    const maskedSecret = cfSecret
+      ? cfSecret.length > 8
+        ? `••••${cfSecret.slice(-4)}`
+        : '••••••'
+      : undefined;
+
+    return {
+      ...raw,
+      cashfree: {
+        ...raw.cashfree,
+        hasSecretKey,
+        maskedSecret,
+      },
+    };
+  }
+
+  updatePaymentSettings(updates: Partial<PaymentSettings>): PaymentSettings {
+    const current = this.getPaymentSettings();
+    const next: PaymentSettings = {
+      ...current,
+      upiQr: updates.upiQr ? { ...current.upiQr, ...updates.upiQr } : current.upiQr,
+      upiId: updates.upiId ? { ...current.upiId, ...updates.upiId } : current.upiId,
+      bankTransfer: updates.bankTransfer ? { ...current.bankTransfer, ...updates.bankTransfer } : current.bankTransfer,
+      cashfree: updates.cashfree ? { ...current.cashfree, ...updates.cashfree } : current.cashfree,
+      updatedAt: Date.now(),
+    };
+
+    this.data.paymentSettings = next;
+    this.saveData();
+    return this.getSanitizedPaymentSettings();
+  }
+
+  // ---------------------------------------------------------------------------
+  // PAYMENT ORDERS
+  // ---------------------------------------------------------------------------
+
+  getPaymentOrders(filter?: { userId?: string; status?: string }): PaymentOrder[] {
+    if (!Array.isArray(this.data.paymentOrders)) {
+      this.data.paymentOrders = [];
+    }
+    let list = this.data.paymentOrders;
+    if (filter?.userId) {
+      list = list.filter((o) => o.userId === filter.userId);
+    }
+    if (filter?.status) {
+      list = list.filter((o) => o.status === filter.status);
+    }
+    return [...list].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  getPaymentOrder(id: string): PaymentOrder | undefined {
+    return (this.data.paymentOrders || []).find((o) => o.id === id);
+  }
+
+  getPaymentOrderByRef(ref: string): PaymentOrder | undefined {
+    return (this.data.paymentOrders || []).find(
+      (o) => o.referenceNumber?.toLowerCase() === ref?.trim().toLowerCase()
+    );
+  }
+
+  createPaymentOrder(data: Partial<PaymentOrder>): PaymentOrder {
+    if (!Array.isArray(this.data.paymentOrders)) {
+      this.data.paymentOrders = [];
+    }
+    const now = Date.now();
+    const randSuffix = Math.floor(1000 + Math.random() * 9000);
+    const referenceNumber = `MYAI-ORD-${now.toString().slice(-6)}-${randSuffix}`;
+    const id = data.id || `ord_${now}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const order: PaymentOrder = {
+      id,
+      userId: data.userId || 'user-admin',
+      userEmail: data.userEmail || 'user@myai.app',
+      userName: data.userName || 'MY AI User',
+      planId: data.planId || 'plan_pro_monthly',
+      planName: data.planName || 'Pro Plan',
+      amountINR: data.amountINR ?? 0,
+      paymentMethod: data.paymentMethod || 'upi_qr',
+      status: data.status || 'pending_verification',
+      referenceNumber,
+      userTransactionRef: data.userTransactionRef?.trim() || '',
+      userProofNotes: data.userProofNotes?.trim() || '',
+      userProofScreenshotUrl: data.userProofScreenshotUrl || '',
+      cashfreeOrderId: data.cashfreeOrderId || '',
+      cashfreePaymentSessionId: data.cashfreePaymentSessionId || '',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.data.paymentOrders.push(order);
+    this.saveData();
+    return order;
+  }
+
+  updatePaymentOrder(id: string, updates: Partial<PaymentOrder>): PaymentOrder | null {
+    if (!Array.isArray(this.data.paymentOrders)) return null;
+    const idx = this.data.paymentOrders.findIndex((o) => o.id === id);
+    if (idx === -1) return null;
+
+    const existing = this.data.paymentOrders[idx];
+    const updated: PaymentOrder = {
+      ...existing,
+      ...updates,
+      updatedAt: Date.now(),
+    };
+
+    this.data.paymentOrders[idx] = updated;
+    this.saveData();
+    return updated;
+  }
+
+  approvePaymentOrder(
+    orderId: string,
+    verifiedBy: string
+  ): { success: boolean; order?: PaymentOrder; subscription?: UserSubscription; error?: string } {
+    const order = this.getPaymentOrder(orderId);
+    if (!order) {
+      return { success: false, error: 'Payment order not found.' };
+    }
+    if (order.status === 'approved') {
+      return { success: false, error: 'Order is already approved.' };
+    }
+
+    const plan = this.getSubscriptionPlan(order.planId);
+    if (!plan) {
+      return { success: false, error: 'Referenced subscription plan was not found.' };
+    }
+
+    // Activate subscription for the user
+    const subscription = this.activateUserSubscription(order.userId, plan, order.id);
+
+    // Update order status
+    const updatedOrder = this.updatePaymentOrder(orderId, {
+      status: 'approved',
+      verifiedAt: Date.now(),
+      verifiedBy,
+    });
+
+    // Record transaction
+    this.addPaymentTransaction({
+      id: `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      orderId: order.id,
+      userId: order.userId,
+      userEmail: order.userEmail,
+      planId: order.planId,
+      amountINR: order.amountINR,
+      paymentMethod: order.paymentMethod,
+      gatewayStatus: 'SUCCESS',
+      createdAt: Date.now(),
+    });
+
+    return {
+      success: true,
+      order: updatedOrder || order,
+      subscription,
+    };
+  }
+
+  rejectPaymentOrder(
+    orderId: string,
+    reason: string,
+    verifiedBy: string
+  ): { success: boolean; order?: PaymentOrder; error?: string } {
+    const order = this.getPaymentOrder(orderId);
+    if (!order) {
+      return { success: false, error: 'Payment order not found.' };
+    }
+    if (order.status === 'approved') {
+      return { success: false, error: 'Cannot reject an already approved payment.' };
+    }
+
+    const updatedOrder = this.updatePaymentOrder(orderId, {
+      status: 'rejected',
+      rejectionReason: reason?.trim() || 'Payment could not be verified in official bank/UPI records.',
+      verifiedAt: Date.now(),
+      verifiedBy,
+    });
+
+    return {
+      success: true,
+      order: updatedOrder || order,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // TRANSACTIONS
+  // ---------------------------------------------------------------------------
+
+  getPaymentTransactions(): PaymentTransaction[] {
+    if (!Array.isArray(this.data.paymentTransactions)) {
+      this.data.paymentTransactions = [];
+    }
+    return [...this.data.paymentTransactions].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  addPaymentTransaction(tx: PaymentTransaction): PaymentTransaction {
+    if (!Array.isArray(this.data.paymentTransactions)) {
+      this.data.paymentTransactions = [];
+    }
+    this.data.paymentTransactions.push(tx);
+    this.saveData();
+    return tx;
+  }
+
+  // ---------------------------------------------------------------------------
+  // USER SUBSCRIPTIONS & ACTIVATION
+  // ---------------------------------------------------------------------------
+
+  getUserSubscriptions(userId: string): UserSubscription[] {
+    if (!Array.isArray(this.data.userSubscriptions)) {
+      this.data.userSubscriptions = [];
+    }
+    return this.data.userSubscriptions
+      .filter((s) => s.userId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  getUserActiveSubscription(userId: string): UserSubscription | null {
+    if (!Array.isArray(this.data.userSubscriptions)) {
+      this.data.userSubscriptions = [];
+      return null;
+    }
+
+    const now = Date.now();
+    const subs = this.data.userSubscriptions.filter((s) => s.userId === userId && s.status === 'active');
+    if (subs.length === 0) return null;
+
+    // Check expiry
+    for (const sub of subs) {
+      if (sub.expiryDate > 0 && now > sub.expiryDate) {
+        sub.status = 'expired';
+        sub.updatedAt = now;
+        this.saveData();
+      }
+    }
+
+    const stillActive = subs.find((s) => s.status === 'active');
+    return stillActive || null;
+  }
+
+  activateUserSubscription(
+    userId: string,
+    plan: SubscriptionPlan,
+    orderId?: string
+  ): UserSubscription {
+    if (!Array.isArray(this.data.userSubscriptions)) {
+      this.data.userSubscriptions = [];
+    }
+
+    const now = Date.now();
+    const user = this.data.users.find((u) => u.id === userId);
+    const userEmail = user?.email || 'user@myai.app';
+
+    // Mark any existing active subscriptions as superseded
+    this.data.userSubscriptions.forEach((s) => {
+      if (s.userId === userId && s.status === 'active') {
+        s.status = 'cancelled';
+        s.updatedAt = now;
+      }
+    });
+
+    // Calculate expiry: durationDays === 0 means free/lifetime (0 timestamp)
+    const expiryDate =
+      plan.durationDays > 0 ? now + plan.durationDays * 24 * 3600 * 1000 : 0;
+
+    const newSub: UserSubscription = {
+      id: `sub_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      userId,
+      userEmail,
+      planId: plan.id,
+      planName: plan.name,
+      tier: plan.tier || 'Pro',
+      amountPaidINR: plan.priceINR,
+      orderId,
+      startDate: now,
+      expiryDate,
+      status: 'active',
+      limitsGranted: {
+        images: plan.limits?.imagesQuota ?? 100,
+        videos: plan.limits?.videosQuota ?? 25,
+        audio: plan.limits?.audioQuota ?? 40,
+        chats: plan.limits?.chatsQuota ?? 1000,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.data.userSubscriptions.push(newSub);
+
+    // Apply generation quotas and tier directly to user account
+    if (user) {
+      user.tier = (plan.tier as any) || 'Pro';
+      user.generationLimits = {
+        imagesRemaining: plan.limits?.imagesQuota ?? 100,
+        videosRemaining: plan.limits?.videosQuota ?? 25,
+        audioRemaining: plan.limits?.audioQuota ?? 40,
+        chatsRemaining: plan.limits?.chatsQuota ?? 1000,
+        totalImagesQuota: plan.limits?.imagesQuota ?? 100,
+        totalVideosQuota: plan.limits?.videosQuota ?? 25,
+        totalAudioQuota: plan.limits?.audioQuota ?? 40,
+      };
+      user.activeSubscription = newSub;
+    }
+
+    this.saveData();
+    return newSub;
+  }
+
+  manualGrantSubscription(
+    userId: string,
+    planId: string,
+    customDurationDays?: number,
+    verifiedBy?: string
+  ): { success: boolean; user?: UserAccount; subscription?: UserSubscription; error?: string } {
+    const user = this.data.users.find((u) => u.id === userId);
+    if (!user) return { success: false, error: 'User not found.' };
+
+    const plan = this.getSubscriptionPlan(planId);
+    if (!plan) return { success: false, error: 'Plan not found.' };
+
+    const effectivePlan: SubscriptionPlan = {
+      ...plan,
+      durationDays:
+        typeof customDurationDays === 'number' && customDurationDays > 0
+          ? customDurationDays
+          : plan.durationDays,
+    };
+
+    const sub = this.activateUserSubscription(userId, effectivePlan, `manual-grant-by-${verifiedBy || 'admin'}`);
+    return {
+      success: true,
+      user: this.getUser(userId),
+      subscription: sub,
+    };
+  }
 }
 
 export const db = new Database();
+

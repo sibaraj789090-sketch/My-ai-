@@ -17,6 +17,7 @@ import {
   Shield,
   Settings,
   Share2,
+  Sparkles,
 } from 'lucide-react';
 import { ChatConversation, UserAccount } from '../types';
 
@@ -47,6 +48,7 @@ interface SidebarProps {
   onOpenAccount: () => void;
   onOpenSettings: () => void;
   onOpenAdmin: () => void;
+  onOpenSubscription?: () => void;
   currentUser: UserAccount | null;
 }
 
@@ -66,6 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenAccount,
   onOpenSettings,
   onOpenAdmin,
+  onOpenSubscription,
   currentUser,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -290,6 +293,41 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </div>
         </div>
+
+        {/* Upgrade / Subscription Banner Button */}
+        {onOpenSubscription && (
+          <div className="px-3 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                onOpenSubscription();
+                onClose();
+              }}
+              className="w-full p-2.5 rounded-2xl bg-gradient-to-r from-blue-600/20 via-purple-600/20 to-amber-500/20 border border-blue-500/40 hover:border-blue-400 text-left flex items-center justify-between group transition shadow-sm"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-7 h-7 rounded-xl gemini-gradient-bg flex items-center justify-center text-white shrink-0 shadow">
+                  <Sparkles className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white group-hover:text-blue-300 transition truncate">
+                    {currentUser?.activeSubscription
+                      ? currentUser.activeSubscription.planName
+                      : 'Upgrade to Pro'}
+                  </div>
+                  <div className="text-[10px] text-slate-300 truncate">
+                    {currentUser?.activeSubscription?.expiryDate
+                      ? 'Active plan & validity'
+                      : 'Unlock 4K & Priority Quotas'}
+                  </div>
+                </div>
+              </div>
+              <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+                ₹ INR
+              </span>
+            </button>
+          </div>
+        )}
 
         {/* Bottom Profile & Settings */}
         <div className="p-3 border-t border-slate-800 flex items-center justify-between gap-2">
