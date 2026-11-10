@@ -12,6 +12,7 @@ import {
   Clock,
   BookOpen,
   HardDrive,
+  Volume2,
 } from 'lucide-react';
 import { ChatMessage, GenerationJob } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -21,6 +22,47 @@ import {
   InlineAudioPlayer,
   InlineCanvasCard,
 } from './MediaViewer';
+
+function cleanTextForSpeech(markdown: string): string {
+  if (!markdown) return '';
+  return markdown
+    .replace(/```[\s\S]*?```/g, 'Code block omitted.')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/[*_~>]/g, '')
+    .replace(/[-*+]\s+/g, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\n+/g, ' ')
+    .trim();
+}
+
+function detectSpeechLanguage(text: string): string {
+  // Check for Devanagari script (Hindi, Marathi, Sanskrit, Nepali)
+  if (/[\u0900-\u097F]/.test(text)) {
+    return 'hi-IN';
+  }
+  if (/[\u0980-\u09FF]/.test(text)) return 'bn-IN';
+  if (/[\u0B80-\u0BFF]/.test(text)) return 'ta-IN';
+  if (/[\u0C00-\u0C7F]/.test(text)) return 'te-IN';
+  if (/[\u0A80-\u0AFF]/.test(text)) return 'gu-IN';
+  return 'en-US';
+}
+
+function selectMatchingVoice(lang: string): SpeechSynthesisVoice | null {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices || voices.length === 0) return null;
+
+  const targetPrefix = lang.toLowerCase().slice(0, 2);
+  const exactMatch = voices.find((v) => v.lang.toLowerCase().replace('_', '-') === lang.toLowerCase());
+  if (exactMatch) return exactMatch;
+
+  const prefixMatch = voices.find((v) => v.lang.toLowerCase().startsWith(targetPrefix));
+  if (prefixMatch) return prefixMatch;
+
+  return voices[0] || null;
+}
 
 interface ChatAreaProps {
   messages: ChatMessage[];
@@ -45,10 +87,62 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length, activeJobs]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const handleToggleSpeak = (msgId: string, content: string) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return;
+    }
+
+    if (speakingMsgId === msgId) {
+      window.speechSynthesis.cancel();
+      setSpeakingMsgId(null);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const plainText = cleanTextForSpeech(content);
+    if (!plainText) return;
+
+    const utterance = new SpeechSynthesisUtterance(plainText);
+    const lang = detectSpeechLanguage(plainText);
+    utterance.lang = lang;
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    const voice = selectMatchingVoice(lang);
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.onstart = () => {
+      setSpeakingMsgId(msgId);
+    };
+
+    utterance.onend = () => {
+      setSpeakingMsgId((curr) => (curr === msgId ? null : curr));
+    };
+
+    utterance.onerror = () => {
+      setSpeakingMsgId((curr) => (curr === msgId ? null : curr));
+    };
+
+    setSpeakingMsgId(msgId);
+    window.speechSynthesis.speak(utterance);
+  };
 
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
@@ -377,6 +471,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       </>
                     )}
                     <span aria-hidden="true">·</span>
+                    {msg.content && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSpeak(msgKey, msg.content)}
+                          title={speakingMsgId === msgKey ? 'Stop listening (आवाज़ रोकें)' : 'Listen to AI reply (सुनें)'}
+                          className={`inline-flex items-center gap-1 transition ${
+                            speakingMsgId === msgKey
+                              ? 'text-blue-400 font-medium'
+                              : 'text-slate-300 hover:text-white'
+                          }`}
+                        >
+                          {speakingMsgId === msgKey ? (
+                            <>
+                              <Square className="w-3.5 h-3.5 fill-current text-blue-400 animate-pulse" />
+                              <span className="text-blue-300">Stop</span>
+                            </>
+                          ) : (
+                            <>
+                              <Volume2 className="w-3.5 h-3.5 text-blue-400" />
+                              <span>Listen</span>
+                            </>
+                          )}
+                        </button>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={() => handleCopy(msgKey, msg.content)}
