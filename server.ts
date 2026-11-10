@@ -48,6 +48,24 @@ const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Root API Health & Diagnostic endpoint
+app.get('/api', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'MY AI API',
+    version: '2.0.0',
+    timestamp: Date.now(),
+  });
+});
+
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: Date.now(),
+  });
+});
+
 // Track active user session (supports switching/login/signup)
 let currentUserId = 'user-admin';
 
@@ -2491,6 +2509,12 @@ async function setupServer() {
   });
 }
 
-setupServer().catch((err) => {
-  console.error('Failed to start MY AI server:', err);
-});
+// Only start standalone listener when not in a serverless environment (such as Vercel)
+if (!process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  setupServer().catch((err) => {
+    console.error('Failed to start MY AI server:', err);
+  });
+}
+
+export { app };
+export default app;

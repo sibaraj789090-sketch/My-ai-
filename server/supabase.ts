@@ -5,8 +5,21 @@ let cachedUrl = '';
 let cachedKey = '';
 
 export function getSupabaseClient(customUrl?: string, customKey?: string): SupabaseClient | null {
-  const url = (customUrl || process.env.SUPABASE_URL || '').trim();
-  const key = (customKey || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
+  const url = (
+    customUrl ||
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    ''
+  ).trim();
+  const key = (
+    customKey ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
 
   if (!url || !key || !url.startsWith('http')) {
     return null;

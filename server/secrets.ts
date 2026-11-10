@@ -1,18 +1,36 @@
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+const isServerless = !!(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.NOW_REGION
+);
+
+const BUNDLED_DATA_DIR = path.resolve(process.cwd(), '.data');
+const DATA_DIR = isServerless ? path.join('/tmp', 'myai_data') : BUNDLED_DATA_DIR;
 const SECRETS_FILE = path.join(DATA_DIR, 'provider_secrets.json');
+const BUNDLED_SECRETS_FILE = path.join(BUNDLED_DATA_DIR, 'provider_secrets.json');
 
 type SecretMap = Record<string, string>;
 
 function loadSecretsMap(): SecretMap {
   try {
     if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+      } catch {
+        // Ignore directory creation failure in read-only environments
+      }
     }
     if (fs.existsSync(SECRETS_FILE)) {
       const raw = fs.readFileSync(SECRETS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as SecretMap;
+      }
+    } else if (isServerless && fs.existsSync(BUNDLED_SECRETS_FILE)) {
+      const raw = fs.readFileSync(BUNDLED_SECRETS_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         return parsed as SecretMap;

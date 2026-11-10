@@ -61,8 +61,16 @@ const DEFAULT_FEATURE_ASSIGNMENTS: FeatureProviderAssignments = {
   code: 'built-in',
 };
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+const isServerless = !!(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.NOW_REGION
+);
+
+const BUNDLED_DATA_DIR = path.resolve(process.cwd(), '.data');
+const DATA_DIR = isServerless ? path.join('/tmp', 'myai_data') : BUNDLED_DATA_DIR;
 const DB_FILE = path.join(DATA_DIR, 'myai_store.json');
+const BUNDLED_DB_FILE = path.join(BUNDLED_DATA_DIR, 'myai_store.json');
 
 export interface ServerProviderSecrets {
   supabaseUrl: string;
@@ -499,10 +507,18 @@ class Database {
   private loadData(): DatabaseSchema {
     try {
       if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+        try {
+          fs.mkdirSync(DATA_DIR, { recursive: true });
+        } catch {
+          // Ignore directory creation failure in read-only environments
+        }
       }
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        return this.migrateSchema(parsed);
+      } else if (isServerless && fs.existsSync(BUNDLED_DB_FILE)) {
+        const raw = fs.readFileSync(BUNDLED_DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         return this.migrateSchema(parsed);
       }
@@ -735,11 +751,16 @@ class Database {
   private saveData(dataToSave?: DatabaseSchema) {
     try {
       if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+        try {
+          fs.mkdirSync(DATA_DIR, { recursive: true });
+        } catch {
+          // In serverless, if directory cannot be created, keep in memory
+          return;
+        }
       }
       fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave || this.data, null, 2), 'utf-8');
     } catch (e) {
-      console.error('Failed to write database:', e);
+      console.warn('Database persistence notice:', e);
     }
   }
 
